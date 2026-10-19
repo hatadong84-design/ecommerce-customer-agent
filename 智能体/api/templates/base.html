@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}电商智能助手{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <button type="button" id="sidebar-toggle" class="sidebar-toggle" title="显示/隐藏侧栏">☰</button>
+  <aside class="sidebar" id="sidebar">
+    <form class="role-switcher" method="post" action="/role">
+      <label>角色切换</label>
+      <div class="role-row">
+        <select name="role">
+          {% for item in roles %}
+          <option value="{{ item }}" {% if item == role %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">切换</button>
+      </div>
+    </form>
+
+    {% if role == '管理员' %}
+      {% if is_admin %}
+        <div class="ok">已登录管理员：{{ admin_user }}</div>
+        <form method="post" action="/logout"><button type="submit">退出登录</button></form>
+      {% else %}
+        <form class="stack" method="post" action="/login">
+          <strong>登录</strong>
+          <input name="username" placeholder="用户名" required>
+          <input name="password" type="password" placeholder="密码" required>
+          <button type="submit">登录</button>
+        </form>
+        <form class="stack" method="post" action="/register">
+          <strong>注册</strong>
+          <input name="username" placeholder="用户名" required>
+          <input name="password" type="password" placeholder="密码（至少 6 位）" required>
+          <input name="invite_code" type="password" placeholder="管理员邀请码" required>
+          <button type="submit">注册</button>
+        </form>
+      {% endif %}
+    {% else %}
+      <p class="hint">普通用户无需登录，可直接问答</p>
+    {% endif %}
+
+    <hr>
+    <nav>
+      <a href="/">智能问答</a>
+      {% if is_admin %}
+        <a href="/report">使用报告</a>
+        <a href="/admin">管理后台</a><a href="/admin/tickets">人工工单</a><a href="/admin/kb">知识库管理</a>
+      {% endif %}
+    </nav>
+    <hr>
+    <p class="hint">用户 ID：{{ session_id }}</p>
+  </aside>
+
+  <main class="content">
+    <h1>电商智能助手</h1>
+    {% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <script>
+    (function () {
+      var KEY = 'sidebar-hidden';
+      var toggle = document.getElementById('sidebar-toggle');
+      if (localStorage.getItem(KEY) === '1') {
+        document.body.classList.add('sidebar-hidden');
+      }
+      toggle.addEventListener('click', function () {
+        var hidden = document.body.classList.toggle('sidebar-hidden');
+        localStorage.setItem(KEY, hidden ? '1' : '0');
+      });
+    })();
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

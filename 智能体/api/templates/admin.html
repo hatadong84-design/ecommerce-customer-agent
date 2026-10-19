@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "_message.html" as ui %}
+<div class="stats">
+  <div class="card"><div class="num">{{ stats.total }}</div><div class="label">用户输入条数</div></div>
+  <div class="card"><div class="num">{{ stats.sessions }}</div><div class="label">用户数</div></div>
+  <div class="card"><div class="num">{{ stats.need_human }}</div><div class="label">需转接人工</div></div>
+  <div class="card"><div class="num">{{ stats.urgent }}</div><div class="label">高紧急</div></div>
+</div>
+{% if stats.emotions %}
+<p class="hint">情绪倾向分布：{% for k, v in stats.emotions.items() %}{{ k }} {{ v }}{% if not loop.last %}、{% endif %}{% endfor %}</p>
+{% endif %}
+{% if stats.categories %}
+<p class="hint">业务类型分布：{% for k, v in stats.categories.items() %}{{ k }} {{ v }}{% if not loop.last %}、{% endif %}{% endfor %}</p>
+{% endif %}
+
+<p class="ticket-summary">人工工单：
+  {% for state, count in ticket_counts.items() %}
+  <a class="ticket-pill" href="/admin/tickets?status={{ state }}">{{ state }} {{ count }}</a>
+  {% endfor %}
+  <a class="ticket-pill" href="/admin/tickets">全部</a>
+</p>
+
+<hr>
+
+{% if not sessions %}
+  <p class="hint">暂无对话记录。普通用户在「智能问答」里发送消息后，这里就会出现记录。</p>
+{% else %}
+<form class="filters" method="get" action="/admin">
+  <label>选择用户
+    <select name="session_id">
+      <option value="">全部用户</option>
+      {% for s in sessions %}
+      <option value="{{ s.session_id }}" {% if s.session_id == selected_session %}selected{% endif %}>{{ s.session_id }} · {{ s.total }} 条 · 最后 {{ s.last_time }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>关键词 <input name="q" value="{{ q }}" placeholder="匹配输入原文"></label>
+  <label>紧急程度
+    <select name="urgency">
+      {% for u in ['全部', '低', '中', '高'] %}
+      <option value="{{ u }}" {% if u == urgency %}selected{% endif %}>{{ u }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="check"><input type="checkbox" name="human" value="1" {% if human %}checked{% endif %}> 仅看需转接人工</label>
+  <label>业务类型
+    <select name="category">
+      {% for c in ['全部'] + categories %}
+      <option value="{{ c }}" {% if c == category %}selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">应用筛选</button>
+</form>
+
+<p class="hint">共 {{ rows|length }} 条记录（按时间倒序，最多显示 500 条）</p>
+
+{% for t in threads %}
+<section class="thread">
+  <div class="thread-head">
+    <strong>{{ t.session_id }}</strong>
+    <span class="hint">{{ t.total }} 条 · 最后 {{ t.last_time }}</span>
+    {% if t.ticket %}<a class="ticket-link" href="/admin/tickets?session_id={{ t.session_id }}">工单 #{{ t.ticket.id }} · {{ t.ticket.status }}</a>{% endif %}
+  </div>
+  <div class="chat">
+    {% for m in t.messages %}{{ ui.render_message(m) }}{% endfor %}
+  </div>
+</section>
+{% endfor %}
+
+<p><a class="btn" href="{{ export_url }}">下载为 CSV</a></p>
+
+<details class="cleanup">
+  <summary>清理历史记录</summary>
+  <form method="post" action="/admin/cleanup">
+    <label>清理范围
+      <select name="target">
+        <option value="">清空全部记录</option>
+        {% for s in sessions %}
+        <option value="{{ s.session_id }}">{{ s.session_id }} · {{ s.total }} 条 · 最后 {{ s.last_time }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" required> 我确认删除，删除后不可恢复</label>
+    <button type="submit">执行清理</button>
+  </form>
+</details>
+{% endif %}
+{% endblock %}

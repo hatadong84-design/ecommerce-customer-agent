@@ -1,0 +1,5 @@
+main_prompt_path: 智能体/prompt/main_prompt.txt
+rag_summarize_prompt_path: 智能体/prompt/rag_summarize.txt
+report_prompt_path: 智能体/prompt/report_prompt.txt
+sentiment_prompt_path: 智能体/prompt/sentiment_prompt.txt
+category_prompt_path: 智能体/prompt/category_prompt.txt

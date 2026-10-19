@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}知识库管理{% endblock %}
+{% block content %}
+<p class="hint">按商品分类维护知识库。每个分类是一份独立的「数据管理器」，可上传 txt / pdf / docx
+文档，并支持修改与删除；改动会同步到向量库，AI 回答即刻使用最新内容。</p>
+
+<div class="stats">
+  <div class="card"><div class="num">{{ categories|length }}</div><div class="label">商品分类</div></div>
+  <div class="card"><div class="num">{{ total }}</div><div class="label">知识文档</div></div>
+</div>
+
+<form class="filters" method="post" action="/admin/kb/cat/create">
+  <label>新建商品分类 <input name="name" placeholder="如：洗地机 / 配件耗材" required></label>
+  <button type="submit">创建分类</button>
+</form>
+
+<form class="filters" method="post" action="/admin/kb/rebuild"
+      onsubmit="return confirm('将清空向量库并按当前全部文档重建索引，文档较多时耗时较久，确认继续？')">
+  <button type="submit">重建向量索引</button>
+</form>
+
+{% if not categories %}
+  <p class="hint">还没有商品分类，先在上面创建一个。</p>
+{% else %}
+<table class="kb-table">
+  <thead>
+    <tr><th>商品分类</th><th>文档数</th><th>创建时间</th><th>操作</th></tr>
+  </thead>
+  <tbody>
+  {% for c in categories %}
+    <tr>
+      <td><a href="/admin/kb/{{ c.name|urlencode }}">{{ c.name }}</a></td>
+      <td>{{ c.doc_count }}</td>
+      <td>{{ c.created_at }}</td>
+      <td>
+        <a class="btn" href="/admin/kb/{{ c.name|urlencode }}">管理数据</a>
+        <form method="post" action="/admin/kb/cat/delete" class="inline-form"
+              onsubmit="return confirm('将同时删除该分类下的全部文档及其向量分片，确认删除？')">
+          <input type="hidden" name="name" value="{{ c.name }}">
+          <button class="danger" type="submit">删除分类</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

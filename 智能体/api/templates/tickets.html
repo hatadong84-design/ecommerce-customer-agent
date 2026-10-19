@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}人工工单{% endblock %}
+{% block content %}
+{% set badge = {'待接入': 'pending', '处理中': 'processing', '已解决': 'done'} %}
+<div class="stats">
+  {% for state in statuses %}
+  <div class="card"><div class="num">{{ counts[state] }}</div><div class="label">{{ state }}</div></div>
+  {% endfor %}
+</div>
+
+<form class="filters" method="get" action="/admin/tickets">
+  <label>工单状态
+    <select name="status">
+      {% for s in ['全部'] + statuses %}
+      <option value="{{ s }}" {% if s == selected_status %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>用户ID <input name="session_id" value="{{ selected_session }}" placeholder="如 用户1001"></label>
+  <button type="submit">筛选</button>
+</form>
+
+{% if not tickets %}
+  <p class="hint">当前没有符合条件的工单。用户在「智能问答」中的输入被判定需要人工介入（含退款诉求）时，会自动生成工单。</p>
+{% else %}
+  {% for t in tickets %}
+  <section class="ticket">
+    <div class="ticket-head">
+      <strong>工单 #{{ t.id }} · {{ t.session_id or '（无用户）' }}</strong>
+      <span class="badge badge-{{ badge.get(t.status, '') }}">{{ t.status }}</span>
+    </div>
+    <p class="ticket-question">{{ t.question }}</p>
+    <p class="hint">转接理由：{{ t.reason or '—' }}</p>
+    <p class="hint">紧急程度：{{ t.urgency or '—' }} ｜ 情绪：{{ t.emotion or '—' }}
+      ｜ 创建 {{ t.created_at }} ｜ 更新 {{ t.updated_at }}
+      ｜ 责任人：{{ t.agent_name or '未指派' }}</p>
+    {% if t.resolution %}<p class="hint">处理记录：{{ t.resolution }}</p>{% endif %}
+    {% if t.close_reason %}<p class="hint">关闭原因：{{ t.close_reason }}</p>{% endif %}
+    <form class="ticket-actions" method="post" action="/admin/tickets/update">
+      <input type="hidden" name="ticket_id" value="{{ t.id }}">
+      <label>责任人 <input name="agent_name" value="{{ t.agent_name or '' }}" placeholder="如：客服小李"></label>
+      <label>转为
+        <select name="status">
+          {% for s in statuses %}<option value="{{ s }}" {% if s == t.status %}selected{% endif %}>{{ s }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="wide">处理记录
+        <textarea name="resolution" rows="2" placeholder="记录核实过程与处理结果，如：已核对订单 #20260812，符合七天无理由，已发起退款">{{ t.resolution or '' }}</textarea>
+      </label>
+      <label class="wide">关闭原因
+        <input name="close_reason" value="{{ t.close_reason or '' }}" placeholder="关闭时填写，如：已与用户确认解决 / 用户撤销诉求">
+      </label>
+      <button type="submit">更新工单</button>
+    </form>
+  </section>
+  {% endfor %}
+{% endif %}
+{% endblock %}

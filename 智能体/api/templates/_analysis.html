@@ -1,0 +1,20 @@
+{# 输入内容分析卡片的公共宏：问答页气泡与流式推送共用同一份渲染，避免样式漂移。
+   ticket 决定是否展示「已生成人工工单」——以工单表为准，而非仅看 need_human 标志；
+   带上工单号与状态，并可直接跳转到对应会话的工单。 #}
+{% macro render_analysis(sentiment, open=False, ticket=None, session_id="") %}
+<details class="analysis" {% if open %}open{% endif %}>
+  <summary>输入内容分析</summary>
+  <ul>
+    <li><strong>业务类型</strong>：{{ sentiment.category or '未分类' }}</li>
+    <li><strong>情绪倾向</strong>：{{ sentiment.emotion }}（强度 {{ sentiment.emotion_level if sentiment.emotion_level is not none else '' }}/100）</li>
+    <li><strong>紧急程度</strong>：{{ sentiment.urgency }}</li>
+    <li><strong>满意程度</strong>：{{ sentiment.satisfaction }}</li>
+    <li><strong>是否转接人工</strong>：{{ '是' if sentiment.need_human else '否' }}（{{ sentiment.need_human_reason }}）</li>
+    <li><strong>诉求摘要</strong>：{{ sentiment.summary }}</li>
+  </ul>
+</details>
+{% if ticket %}
+<div class="warning">已生成人工工单 #{{ ticket.id }}（{{ ticket.status }}）
+  <a href="/admin/tickets{% if session_id %}?session_id={{ session_id }}{% endif %}">前往处理</a></div>
+{% endif %}
+{% endmacro %}

@@ -1,0 +1,7 @@
+﻿session_id,called_tools,fetch_called,user_id_arg,month_arg,id_match
+用户1001,fetch_external_data;get_user_id,True,用户1001,2026-08,True
+用户1002,fetch_external_data;get_user_id,True,用户1002,2026-08,True
+用户1003,fetch_external_data;get_user_id,True,用户1003,2026-08,True
+用户1004,fetch_external_data,True,用户1004,2026-08,True
+用户1005,fetch_external_data;get_user_id,True,用户1005,2026-08,True
+用户1006,fetch_external_data,True,用户1006,2026-08,True

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<form class="report-form" method="post" action="/report">
+  <label>用户
+    <select name="user_id">
+      {% for u in users %}<option value="{{ u }}" {% if u == selected_user %}selected{% endif %}>{{ u }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>月份
+    <select name="month">
+      {% for m in months %}<option value="{{ m }}" {% if m == selected_month %}selected{% endif %}>{{ m }}</option>{% endfor %}
+    </select>
+  </label>
+  <button type="submit">生成使用情况报告</button>
+</form>
+{% if report %}
+  <article class="report md">{{ report | md }}</article>
+  <p class="hint">报告已保存，{{ selected_user }} 在自己的问答页可以看到「我的使用报告」。</p>
+{% else %}
+  <p class="hint">选择用户与月份后点击按钮，将基于使用记录与知识库生成报告。</p>
+{% endif %}
+{% if saved_months %}
+<p class="hint">{{ selected_user }} 已保存的报告月份：{{ saved_months | join('、') }}</p>
+{% endif %}
+{% endblock %}

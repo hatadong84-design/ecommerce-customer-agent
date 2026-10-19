@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}{{ category }} · 数据管理器{% endblock %}
+{% block content %}
+<p class="hint">商品分类：<strong>{{ category }}</strong> · 共 {{ documents|length }} 篇文档 ·
+  <a href="/admin/kb">返回知识库总览</a></p>
+
+<section class="kb-upload">
+  <h3>上传新知识文档</h3>
+  <form class="kb-form" method="post" action="/admin/kb/doc/upload" enctype="multipart/form-data">
+    <input type="hidden" name="category" value="{{ category }}">
+    <label>文档标题 <input name="title" placeholder="留空则自动取文件名"></label>
+    <label>选择文件 <input type="file" name="file" accept=".txt,.pdf,.docx" required></label>
+    <button type="submit">上传并建立索引</button>
+  </form>
+  <p class="hint">支持 .txt / .pdf / .docx，单文件不超过 10MB、PDF 不超过 200 页；上传后自动切分写入向量库，AI 立即可以检索到。</p>
+</section>
+
+{% if not documents %}
+  <p class="hint">该分类下还没有文档，用上面的表单上传。</p>
+{% else %}
+  {% for d in documents %}
+  <section class="kb-doc">
+    <div class="kb-doc-head">
+      <strong>#{{ d.id }} {{ d.title }}</strong>
+      <span class="badge badge-done">{{ d.source_type }}</span>
+      {% if d.index_status == '已索引' %}
+        <span class="badge badge-done">{{ d.index_status }}</span>
+      {% elif d.index_status == '索引失败' %}
+        <span class="badge badge-pending">{{ d.index_status }}</span>
+      {% else %}
+        <span class="badge badge-processing">{{ d.index_status or '未索引' }}</span>
+      {% endif %}
+    </div>
+    <p class="hint">{{ d.char_count }} 字 ｜ 更新于 {{ d.updated_at }}</p>
+    {% if d.index_error %}<p class="hint">索引失败原因：{{ d.index_error }}</p>{% endif %}
+
+    <details>
+      <summary>查看 / 修改正文</summary>
+      <form class="kb-form" method="post" action="/admin/kb/doc/update">
+        <input type="hidden" name="doc_id" value="{{ d.id }}">
+        <label>标题 <input name="title" value="{{ d.title }}" required></label>
+        <label>正文 <textarea name="content" rows="14">{{ d.content }}</textarea></label>
+        <button type="submit">保存并重建索引</button>
+      </form>
+    </details>
+
+    <form method="post" action="/admin/kb/doc/delete" class="inline-form"
+          onsubmit="return confirm('删除后该文档的向量分片会一并清除，确认删除？')">
+      <input type="hidden" name="doc_id" value="{{ d.id }}">
+      <button class="danger" type="submit">删除文档</button>
+    </form>
+    {% if d.index_status == '索引失败' %}
+    <form method="post" action="/admin/kb/doc/reindex" class="inline-form">
+      <input type="hidden" name="doc_id" value="{{ d.id }}">
+      <button type="submit">重试建索引</button>
+    </form>
+    {% endif %}
+  </section>
+  {% endfor %}
+{% endif %}
+{% endblock %}

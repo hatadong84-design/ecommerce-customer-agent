@@ -1,0 +1,19 @@
+{# 对话气泡的公共渲染宏，智能问答与管理后台共用，避免两处样式/字段漂移 #}
+{% import "_analysis.html" as analysis %}
+{% macro render_message(m) %}
+  {% if m.role == 'user' %}
+    <div class="msg user">
+      <div class="bubble">{{ m.content }}</div>
+      {% if m.sentiment %}
+        {{ analysis.render_analysis(m.sentiment, m.open, m.ticket, m.session_id) }}
+      {% elif m.ticket %}
+        <div class="handoff-tag">已提交人工工单 #{{ m.ticket.id }}（{{ m.ticket.status }}），请等待坐席接入</div>
+      {% endif %}
+    </div>
+  {% else %}
+    <div class="msg assistant">
+      {% if m.tools_used %}<div class="tools">调用工具：{{ m.tools_used }}</div>{% endif %}
+      <div class="bubble md">{{ m.content | md }}</div>
+    </div>
+  {% endif %}
+{% endmacro %}

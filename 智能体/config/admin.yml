@@ -1,0 +1,4 @@
+# 管理员邀请码已移到环境变量 ADMIN_INVITE_CODE（见项目根目录 .env / .env.example），
+# 仓库里的 admin.yml 不再存放真实邀请码，这里只保留一个空占位。
+db_path: 智能体/data/admin.db
+invite_code: ""

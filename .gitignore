@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────
+# 仓库范围：只跟踪「智能体」项目与根级配置文件。
+# 根目录下与项目无关的练习目录（Milvus、13天复习、rag实战、
+# langgrach、p5_智能体 等）及其中的历史密钥一律不入库。
+# 注意：gitignore 不支持行尾注释，# 只在行首生效。
+# ─────────────────────────────────────────────────────────────
+/*
+!/智能体/
+
+# README 引用的演示截图
+!/docs/
+
+# pytest 测试
+!/tests/
+!/README.md
+!/requirements.txt
+!/pytest.ini
+!/docker-compose.yml
+!/.env.example
+!/.gitignore
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 敏感配置：密钥、连接串一律不入库
+.env
+.env.*
+# 但保留不含真实密钥的模板，方便别人克隆后照着填
+!.env.example
+
+# 运行时数据与日志
+logs/
+*.log
+chat_history/
+chroma_db/
+md5.text
+
+# 迁移到 PostgreSQL 后遗留的旧 SQLite 库（含 -wal / -shm 运行时文件）
+智能体/data/admin.db*
+
+# 工具与编辑器
+.idea/
+.vscode/
+.pytest_cache/
+
+# Trae/IDE 本地工作目录（含内部设计稿）
+.trae/

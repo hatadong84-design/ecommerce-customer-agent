@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block content %}
+{% import "_message.html" as ui %}
+{% if my_reports %}
+<section class="my-reports">
+  <h2>我的使用报告</h2>
+  {% for r in my_reports %}
+  <details class="report-card" {% if loop.first %}open{% endif %}>
+    <summary>{{ r.month }} 使用报告 · 更新于 {{ r.updated_at }}</summary>
+    <article class="report md">{{ r.content | md }}</article>
+  </details>
+  {% endfor %}
+</section>
+{% endif %}
+<div class="chat" id="chat">
+  {% if not messages %}<p class="hint" id="empty-hint">还没有对话，发送第一条提问试试。</p>{% endif %}
+  {% for m in messages %}{{ ui.render_message(m) }}{% endfor %}
+</div>
+
+<form class="chat-form" id="chat-form" method="post" action="/chat">
+  <input name="question" placeholder="请输入问题，例如：扫地机器人无法回充怎么办？" required autocomplete="off">
+  <button type="submit">发送</button>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // 渐进增强：直接提交走 /chat 整页刷新，支持 JS 时改用 /chat/stream 流式渲染
+  (function () {
+    var form = document.getElementById('chat-form');
+    if (!form || !window.fetch) return;
+
+    var chat = document.getElementById('chat');
+    var input = form.querySelector('input[name="question"]');
+    var button = form.querySelector('button');
+    var busy = false;
+
+    function scrollToEnd() {
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function makeMessage(role) {
+      var wrap = document.createElement('div');
+      wrap.className = 'msg ' + role;
+      var tools = document.createElement('div');
+      tools.className = 'tools';
+      tools.style.display = 'none';
+      var bubble = document.createElement('div');
+      bubble.className = 'bubble' + (role === 'assistant' ? ' md' : '');
+      if (role === 'assistant') {
+        wrap.appendChild(tools);
+        wrap.appendChild(bubble);
+      } else {
+        wrap.appendChild(bubble);
+      }
+      chat.appendChild(wrap);
+      return { wrap: wrap, tools: tools, bubble: bubble };
+    }
+
+    form.addEventListener('submit', function (event) {
+      var text = input.value.trim();
+      if (!text) { event.preventDefault(); return; }
+      // 没有流式能力时退回普通提交
+      if (busy) { event.preventDefault(); return; }
+      event.preventDefault();
+
+      busy = true;
+      button.disabled = true;
+      var hint = document.getElementById('empty-hint');
+      if (hint) hint.remove();
+
+      var user = makeMessage('user');
+      user.bubble.textContent = text;
+
+      var reply = makeMessage('assistant');
+      reply.bubble.textContent = '正在思考…';
+      scrollToEnd();
+      input.value = '';
+
+      var toolNames = [];
+      var raw = '';
+      var finished = false;
+
+      function finish() {
+        busy = false;
+        button.disabled = false;
+        scrollToEnd();
+      }
+
+      function handleEvent(block) {
+        var name = 'message';
+        var data = '';
+        block.split('\n').forEach(function (line) {
+          if (line.indexOf('event:') === 0) name = line.slice(6).trim();
+          else if (line.indexOf('data:') === 0) data += line.slice(5).trim();
+        });
+        if (!data) return;
+        var payload;
+        try { payload = JSON.parse(data); } catch (err) { return; }
+
+        if (name === 'sentiment') {
+          if (payload.analysis_html) {
+            var holder = document.createElement('div');
+            holder.innerHTML = payload.analysis_html;
+            while (holder.firstChild) user.wrap.appendChild(holder.firstChild);
+          } else if (payload.ticket) {
+            var tag = document.createElement('div');
+            tag.className = 'handoff-tag';
+            tag.textContent = '已提交人工工单 #' + payload.ticket.id +
+              '（' + payload.ticket.status + '），请等待坐席接入';
+            user.wrap.appendChild(tag);
+          } else if (payload.need_human) {
+            var tag = document.createElement('div');
+            tag.className = 'handoff-tag';
+            tag.textContent = '已为您申请人工客服，请等待坐席接入';
+            user.wrap.appendChild(tag);
+          }
+        } else if (name === 'tool') {
+          toolNames.push(payload);
+          reply.tools.style.display = '';
+          reply.tools.textContent = '调用工具：' + toolNames.join('、');
+        } else if (name === 'token') {
+          if (raw === '') reply.bubble.textContent = '';
+          raw += payload;
+          reply.bubble.textContent = raw;
+        } else if (name === 'done') {
+          reply.bubble.innerHTML = payload.html;
+          if (!toolNames.length) reply.tools.style.display = 'none';
+          else reply.tools.textContent = '调用工具：' + toolNames.join('、');
+          finished = true;
+        } else if (name === 'error') {
+          reply.bubble.textContent = payload;
+          finished = true;
+        }
+        scrollToEnd();
+      }
+
+      var body = new FormData();
+      body.append('question', text);
+
+      fetch('/chat/stream', { method: 'POST', body: body })
+        .then(function (response) {
+          if (!response.ok || !response.body) throw new Error('无法建立流式连接');
+          var reader = response.body.getReader();
+          var decoder = new TextDecoder();
+          var buffer = '';
+          function pump() {
+            return reader.read().then(function (result) {
+              if (result.done) {
+                if (buffer) handleEvent(buffer);
+                return;
+              }
+              buffer += decoder.decode(result.value, { stream: true });
+              var blocks = buffer.split('\n\n');
+              buffer = blocks.pop();
+              blocks.forEach(handleEvent);
+              return pump();
+            });
+          }
+          return pump();
+        })
+        .catch(function () {
+          if (!finished) reply.bubble.textContent = '网络异常，请稍后重试。';
+        })
+        .then(finish);
+    });
+  })();
+</script>
+{% endblock %}

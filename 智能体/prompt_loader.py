@@ -67,6 +67,19 @@ def load_category_prompts():
         logger.error(f"[load_category_prompts]解析系统提示词出错，{str(e)}")
         raise e
 
+def load_answer_guard_prompts():
+    try:
+        answer_guard_prompt_path = get_abs_path(prompt_conf["answer_guard_prompt_path"])
+    except KeyError as e:
+        logger.error(f"[load_answer_guard_prompts]在yaml配置项中没有answer_guard_prompt_path配置项")
+        raise e
+
+    try:
+        return open(answer_guard_prompt_path, "r", encoding="utf-8").read()
+    except Exception as e:
+        logger.error(f"[load_answer_guard_prompts]解析资料审核提示词出错，{str(e)}")
+        raise e
+
 if __name__ == "__main__":
     print(load_rag_summarize_prompts())
     # print(load_report_prompts())

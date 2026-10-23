@@ -3,11 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}电商智能助手{% endblock %}</title>
+  <title>{% block title %}电商售后 · 证据约束问答与工单流转{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <button type="button" id="sidebar-toggle" class="sidebar-toggle" title="显示/隐藏侧栏">☰</button>
+  <button type="button" id="sidebar-toggle" class="sidebar-toggle" title="显示/隐藏侧栏" aria-label="显示/隐藏侧栏">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="4"/>
+      <line x1="9" y1="3" x2="9" y2="21"/>
+    </svg>
+  </button>
   <aside class="sidebar" id="sidebar">
     <form class="role-switcher" method="post" action="/role">
       <label>角色切换</label>
@@ -37,6 +43,7 @@
           <input name="username" placeholder="用户名" required>
           <input name="password" type="password" placeholder="密码（至少 6 位）" required>
           <input name="invite_code" type="password" placeholder="管理员邀请码" required>
+          <p class="hint">演示邀请码：{{ invite_code }}，可直接填入体验管理员功能</p>
           <button type="submit">注册</button>
         </form>
       {% endif %}
@@ -57,7 +64,7 @@
   </aside>
 
   <main class="content">
-    <h1>电商智能助手</h1>
+    <h1>电商售后 · 证据约束问答与工单流转</h1>
     {% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
     {% block content %}{% endblock %}
   </main>

@@ -11,7 +11,7 @@ markdown-it-py==4.2.0           # 回答的 Markdown 渲染
 # ---- 智能体与检索 ----
 langchain==1.4.4
 langchain-core==1.6.9
-langchain-community==0.4.2      # ChatTongyi / DashScopeEmbeddings / 文档加载器
+langchain-community==0.4.2      # 文档加载器与旧模型封装（对话/嵌入已改走 SiliconFlow）
 langchain-openai==1.7.0
 langchain-chroma==1.1.0
 langchain-text-splitters==1.1.3

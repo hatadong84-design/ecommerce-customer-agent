@@ -47,6 +47,10 @@ md5.text
 # 迁移到 PostgreSQL 后遗留的旧 SQLite 库（含 -wal / -shm 运行时文件）
 智能体/data/admin.db*
 
+# 企业工作流平台的评估产物，属于另一个独立项目，不纳入本仓库
+智能体/eval/workflow_platform_cases.json
+智能体/eval/results/workflow_platform_eval.csv
+
 # 工具与编辑器
 .idea/
 .vscode/

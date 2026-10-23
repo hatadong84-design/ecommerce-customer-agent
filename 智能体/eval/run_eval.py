@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""电商智能客服评测脚本（第一版：表格化记录，不引入评测框架）。
+"""电商智能助手评测脚本（第一版：表格化记录，不引入评测框架）。
 
 覆盖四类检查：
     retrieval  检索命中正确文档 / 低相关资料被拦下 / 商品分类隔离（含改进前后对比）
@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import csv
 import io
+import re
 import sys
 import time
 from pathlib import Path
@@ -33,7 +34,14 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from 智能体.admin import store
 from 智能体.agent.agent import agent
-from 智能体.agent.tools.agent_tools import extract_rag_sources, set_current_session
+from 智能体.agent.answer_guard import apply_guard, prefetch_knowledge, should_call_agent
+from 智能体.agent.tools.agent_tools import (
+    RAG_SOURCE_PREFIX,
+    extract_rag_sources,
+    set_current_knowledge,
+    set_current_session,
+)
+from 智能体.rag.rag_service import NO_KNOWLEDGE_ANSWER
 from 智能体.config_handler import chroma_conf
 from 智能体.rag import kb_service
 from 智能体.rag.rag_service import RELEVANCE_THRESHOLD, RagSummarizeService
@@ -43,9 +51,74 @@ HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "results"
 K = chroma_conf["k"]
 
-# 回答里出现这些说法，说明模型明确承认「资料里没有」，不算无依据作答
-NO_INFO_HINTS = ("没有找到", "没有关于", "未提及", "没有提及", "没有相关信息", "暂无相关",
-                 "资料中没有", "知识库中没有", "没有收录", "无法提供", "不提供", "不掌握")
+# 回答里出现这些说法，说明模型明确承认「资料里没有」或「超出服务范围」。
+# 分两类：硬拒绝（能力/范围）本身就是正确拒答；软拒绝（没资料）还要看后面有没有补常识。
+HARD_REFUSAL_PATTERNS = (
+    r"不在服务范围", r"服务范围仅限", r"不属于本助手", r"不属于.*服务范畴",
+    r"没有.*功能", r"无法查询", r"无法提供", r"无法帮您", r"不涉及",
+    r"不提供", r"不掌握", r"仅提供", r"只能提供", r"超出.*范围",
+)
+SOFT_REFUSAL_PATTERNS = (
+    r"没有找到", r"没有关于", r"未提及", r"没有提及", r"没有相关信息", r"暂无相关",
+    r"资料中没有", r"知识库中没有", r"没有收录", r"未收录",
+)
+
+# 「拒答之后又给结论」的信号：只认实质性判断，不把「建议补充型号/转人工」当成作答
+GENERIC_AFTER_REFUSAL_PATTERNS = (
+    r"通常", r"一般", r"取决于", r"大概", r"往往", r"常见的是",
+    r"为准", r"需根据", r"综合判定", r"视.*而定", r"通常来说",
+)
+
+# 没有调用检索，却在回答里声称有依据（含编造「参考来源」）
+CLAIMED_RETRIEVAL_PATTERNS = (
+    r"检索结果", r"根据知识库", r"根据资料", r"专业知识库", r"检索到", r"从知识库中",
+    r"参考来源", r"依据.*(规范|标准|资料|知识库)",
+)
+
+
+def _first_match(patterns, text: str):
+    matches = [m for p in patterns for m in re.finditer(p, text)]
+    return min(matches, key=lambda m: m.start()) if matches else None
+
+
+def refusal_hit(answer: str) -> bool:
+    """回答是否包含明确拒绝（没资料或超出服务范围）"""
+    text = str(answer or "")
+    return _first_match(HARD_REFUSAL_PATTERNS, text) is not None \
+        or _first_match(SOFT_REFUSAL_PATTERNS, text) is not None
+
+
+def substantive_after_refusal(answer: str) -> bool:
+    """先承认没资料（或超出范围）、随后又给出实质性结论：这是本轮要防的失败模式"""
+    text = str(answer or "")
+    first = _first_match(HARD_REFUSAL_PATTERNS, text) \
+        or _first_match(SOFT_REFUSAL_PATTERNS, text)
+    if not first:
+        return False
+    tail = text[first.end():]
+    if len(tail) <= 40:
+        return False
+    return any(re.search(p, tail) for p in GENERIC_AFTER_REFUSAL_PATTERNS)
+
+
+def claimed_retrieval_without_tool(answer: str, called_rag: bool,
+                                   preretrieved: bool = False) -> bool:
+    """回答声称「知识库检索结果」，但本轮既没调工具也没预检索"""
+    if called_rag or preretrieved:
+        return False
+    return _first_match(CLAIMED_RETRIEVAL_PATTERNS, str(answer or "")) is not None
+
+
+def sources_in_answer(answer: str) -> list[str]:
+    """从最终回答的「参考来源：」后解析文档标题"""
+    text = str(answer or "")
+    index = text.find(RAG_SOURCE_PREFIX)
+    if index < 0:
+        return []
+    tail = text[index + len(RAG_SOURCE_PREFIX):].splitlines()
+    if not tail:
+        return []
+    return [name.strip() for name in tail[0].split("、") if name.strip()]
 
 
 def load_questions() -> list[dict]:
@@ -180,6 +253,26 @@ async def run_agent_turn(session_id: str, history: list[dict]):
     return "".join(texts).strip(), tools, sources
 
 
+async def guard_turn(session_id: str, history: list[dict], question: str):
+    """与 Web 路径一致的评测入口：预检索 → 可能短路 → agent → 答案守卫。
+
+    返回 (最终回答, 工具, 工具来源, 预检索结果, 是否被守卫拒答)。
+    """
+    recent = [m["content"] for m in history if m["role"] == "user"][-4:]
+    knowledge = prefetch_knowledge(question, recent_questions=recent)
+    set_current_knowledge(knowledge)
+
+    if not should_call_agent(knowledge):
+        return NO_KNOWLEDGE_ANSWER, [], [], knowledge, True
+
+    raw, tools, sources = await run_agent_turn(
+        session_id, history + [{"role": "user", "content": question}]
+    )
+    guarded = apply_guard(raw, knowledge)
+    refused = guarded == NO_KNOWLEDGE_ANSWER and raw != NO_KNOWLEDGE_ANSWER
+    return guarded, tools, sources, knowledge, refused
+
+
 async def e2e_layer() -> None:
     cases: dict[str, list[dict]] = {}
     for q in load_questions():
@@ -191,43 +284,130 @@ async def e2e_layer() -> None:
         history: list[dict] = []
         for turn in sorted(turns, key=lambda r: int(r["turn"])):
             start = time.time()
-            answer, tools, sources = await run_agent_turn(
-                session_id, history + [{"role": "user", "content": turn["question"]}]
+            answer, tools, sources, knowledge, guard_refused = await guard_turn(
+                session_id, history, turn["question"]
             )
             seconds = round(time.time() - start, 1)
             history += [{"role": "user", "content": turn["question"]},
                         {"role": "assistant", "content": answer}]
 
             expect_docs = [t for t in turn["expect_docs"].split("|") if t.strip()]
-            refusals = [h for h in NO_INFO_HINTS if h in answer]
+            called_rag = "rag_summarize" in tools
+            final_sources = sources_in_answer(answer)
+            refusal = refusal_hit(answer)
+            # 退款等业务分类也照常预检索：只要推断出商品分类就查资料
+            preretrieved = bool(knowledge.get("category"))
+            cl = knowledge.get("checked")
+            retrieval_used = called_rag or preretrieved
+            claimed = claimed_retrieval_without_tool(answer, called_rag, preretrieved)
             rows.append({
                 "id": turn["id"], "group": turn["group"], "turn": turn["turn"],
                 "session_id": session_id, "question": turn["question"],
                 "expect_docs": turn["expect_docs"], "expect_behavior": turn["expect_behavior"],
-                "tools_used": ";".join(tools), "called_rag": "rag_summarize" in tools,
-                "has_source": bool(sources), "sources": ";".join(sources),
-                "no_info_signal": bool(refusals),
-                "flag_miss_tool": bool(expect_docs) and "rag_summarize" not in tools,
-                "flag_no_source": bool(expect_docs) and not sources,
-                "flag_unsupported": turn["expect_behavior"] == "明确拒答" and not refusals,
+                "tools_used": ";".join(tools), "called_rag": called_rag,
+                "preretrieved": preretrieved, "retrieval_used": retrieval_used,
+                "has_source": bool(final_sources), "sources": ";".join(sources),
+                "final_sources": ";".join(final_sources),
+                "no_info_signal": refusal,
+                "flag_miss_tool": bool(expect_docs) and not retrieval_used,
+                "flag_no_source": bool(expect_docs) and not final_sources,
+                "flag_unsupported": (
+                    turn["expect_behavior"] == "明确拒答"
+                    and (not refusal or substantive_after_refusal(answer))
+                ),
+                "claimed_retrieval_without_tool": claimed,
+                "guard_refused": guard_refused,
+                "guard_refused_on_answerable": bool(expect_docs) and guard_refused,
+                "preretrieval_checked": cl,
+                "preretrieval_category": knowledge.get("category") or "",
+                "preretrieval_reason": knowledge.get("reason") or "",
                 "seconds": seconds,
                 "answer": answer[:200].replace("\n", " "),
             })
             answers.append(f"## {turn['id']}（{turn['group']}）{turn['question']}\n"
-                           f"tools={tools} sources={sources} seconds={seconds}\n\n{answer}\n")
+                           f"tools={tools} sources={sources} final_sources={final_sources} "
+                           f"preretrieved={preretrieved}/{knowledge.get('category') or '无分类'} "
+                           f"guard_refused={guard_refused} claimed_without_tool={claimed} "
+                           f"seconds={seconds}\n\n{answer}\n")
 
     fields = ["id", "group", "turn", "session_id", "question", "expect_docs", "expect_behavior",
-              "tools_used", "called_rag", "has_source", "sources", "no_info_signal",
-              "flag_miss_tool", "flag_no_source", "flag_unsupported", "seconds", "answer"]
+              "tools_used", "called_rag", "preretrieved", "preretrieval_category",
+              "preretrieval_checked", "preretrieval_reason", "retrieval_used",
+              "has_source", "sources", "final_sources", "no_info_signal",
+              "flag_miss_tool", "flag_no_source", "flag_unsupported",
+              "claimed_retrieval_without_tool", "guard_refused",
+              "guard_refused_on_answerable", "seconds", "answer"]
     dump("e2e_results.csv", fields, rows)
     (RESULTS / "answers.md").write_text("\n".join(answers), encoding="utf-8")
 
     kb_rows = [r for r in rows if r["expect_docs"]]
     refuse_rows = [r for r in rows if r["expect_behavior"] == "明确拒答"]
     print(f"[端到端] 共 {len(rows)} 轮，平均 {round(sum(r['seconds'] for r in rows) / len(rows), 1)} 秒/轮")
-    print(f"  应检索题未调用检索 {sum(1 for r in kb_rows if r['flag_miss_tool'])}/{len(kb_rows)}")
+    print(f"  应检索但无依据 {sum(1 for r in kb_rows if r['flag_miss_tool'])}/{len(kb_rows)}")
     print(f"  命中预期但缺来源 {sum(1 for r in kb_rows if r['flag_no_source'])}/{len(kb_rows)}")
     print(f"  无答案题疑似无依据作答 {sum(1 for r in refuse_rows if r['flag_unsupported'])}/{len(refuse_rows)}")
+    for r in refuse_rows:
+        if r["flag_unsupported"]:
+            print(f"    仍标记：id {r['id']} {r['question']}")
+    print(f"  声称检索但未检索 "
+          f"{sum(1 for r in rows if r['claimed_retrieval_without_tool'])}/{len(rows)}")
+    print(f"  有资料却被拒答 "
+          f"{sum(1 for r in rows if r['guard_refused_on_answerable'])}/{len(kb_rows)}")
+    for r in rows:
+        if r["guard_refused"]:
+            print(f"    守卫拒答：id {r['id']} 分类={r['preretrieval_category'] or '无'} "
+                  f"原因={r['preretrieval_reason']}")
+    write_e2e_summary(rows)
+
+
+def _true(value) -> bool:
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
+def _count(rows: list[dict], key: str) -> int:
+    return sum(1 for r in rows if _true(r.get(key)))
+
+
+def _rate(rows: list[dict], key: str, total: int) -> str:
+    return f"{_count(rows, key)}/{total}" if total else "0/0"
+
+
+def write_e2e_summary(after: list[dict]) -> None:
+    """对照 e2e_results_before.csv 输出 before/after 明细，避免只报一个总数"""
+    before: list[dict] = []
+    path = RESULTS / "e2e_results_before.csv"
+    if path.exists():
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            before = list(csv.DictReader(f))
+
+    def block(rows: list[dict]) -> dict:
+        kb_rows = [r for r in rows if r.get("expect_docs")]
+        refuse_rows = [r for r in rows if r.get("expect_behavior") == "明确拒答"]
+        return {
+            "应检索但无依据": _rate(kb_rows, "flag_miss_tool", len(kb_rows)),
+            "命中预期但缺来源": _rate(kb_rows, "flag_no_source", len(kb_rows)),
+            "无答案题疑似作答": _rate(refuse_rows, "flag_unsupported", len(refuse_rows)),
+            "声称检索但未检索": _rate(rows, "claimed_retrieval_without_tool", len(rows)),
+            "有资料却被拒答": _rate(kb_rows, "guard_refused_on_answerable", len(kb_rows)),
+            "平均耗时(秒/轮)": round(sum(float(r["seconds"]) for r in rows) / len(rows), 1)
+            if rows else 0,
+        }
+
+    before_stats, after_stats = block(before), block(after)
+    notes = {
+        "应检索但无依据": "expect_docs 且本轮既未调工具也未预检索",
+        "命中预期但缺来源": "expect_docs 且最终回答没有「参考来源：」",
+        "无答案题疑似作答": "明确拒答题命中拒答后又给出通用结论",
+        "声称检索但未检索": "回答声称有检索依据，但本轮没有检索动作",
+        "有资料却被拒答": "预检索有资料却被守卫拒答，用于发现误拒",
+        "平均耗时(秒/轮)": "守卫多一次模型调用，用于衡量延迟代价",
+    }
+    rows = [{"metric": k, "before": before_stats[k], "after": after_stats[k],
+             "note": notes[k]} for k in notes]
+    dump("e2e_summary.csv", ["metric", "before", "after", "note"], rows)
+    print("[端到端对照] 已写入 e2e_summary.csv")
+    for row in rows:
+        print(f"  {row['metric']}: 改进前={row['before']} 改进后={row['after']}")
 
 
 # ============================================================

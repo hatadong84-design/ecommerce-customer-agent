@@ -24,10 +24,12 @@
   <p class="hint">当前没有符合条件的工单。用户在「智能问答」中的输入被判定需要人工介入（含退款诉求）时，会自动生成工单。</p>
 {% else %}
   {% for t in tickets %}
-  <section class="ticket">
+  <section class="ticket ticket-clickable" data-href="/admin/tickets/{{ t.id }}"
+           tabindex="0" role="link" aria-label="查看工单 #{{ t.id }} 的对话记录">
     <div class="ticket-head">
       <strong>工单 #{{ t.id }} · {{ t.session_id or '（无用户）' }}</strong>
       <span class="badge badge-{{ badge.get(t.status, '') }}">{{ t.status }}</span>
+      <span class="ticket-open-hint">查看对话记录</span>
     </div>
     <p class="ticket-question">{{ t.question }}</p>
     <p class="hint">转接理由：{{ t.reason or '—' }}</p>
@@ -36,6 +38,18 @@
       ｜ 责任人：{{ t.agent_name or '未指派' }}</p>
     {% if t.resolution %}<p class="hint">处理记录：{{ t.resolution }}</p>{% endif %}
     {% if t.close_reason %}<p class="hint">关闭原因：{{ t.close_reason }}</p>{% endif %}
+    <details class="ticket-history">
+      <summary>变更记录（{{ events.get(t.id, [])|length }}）</summary>
+      {% if events.get(t.id) %}
+      <ol>
+        {% for e in events.get(t.id) %}
+        <li>{{ e.created_at }} · {{ e.operator or 'system' }} · {{ e.from_status or '—' }} → {{ e.to_status }}{% if e.note %} · {{ e.note }}{% endif %}</li>
+        {% endfor %}
+      </ol>
+      {% else %}
+      <p class="hint">暂无变更记录</p>
+      {% endif %}
+    </details>
     <form class="ticket-actions" method="post" action="/admin/tickets/update">
       <input type="hidden" name="ticket_id" value="{{ t.id }}">
       <label>责任人 <input name="agent_name" value="{{ t.agent_name or '' }}" placeholder="如：客服小李"></label>
@@ -55,4 +69,22 @@
   </section>
   {% endfor %}
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    document.querySelectorAll('.ticket-clickable').forEach(function (card) {
+      var url = card.dataset.href;
+      card.addEventListener('click', function (e) {
+        // 表单、变更记录等交互区域照常操作，其余区域点击进入工单详情
+        if (e.target.closest('form, details, a, button, input, select, textarea, label')) return;
+        window.location.href = url;
+      });
+      card.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') window.location.href = url;
+      });
+    });
+  })();
+</script>
 {% endblock %}

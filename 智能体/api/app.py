@@ -17,20 +17,25 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
 from 智能体.admin import auth, store
+from 智能体.agent import order_service
 from 智能体.agent.agent import agent
+from 智能体.agent.answer_guard import apply_guard, prefetch_knowledge, should_call_agent
 from 智能体.agent.tools.agent_tools import (
     RAG_SOURCE_PREFIX,
     extract_rag_sources,
+    set_current_knowledge,
+    set_current_order,
     set_current_session,
     set_current_ticket,
 )
 from 智能体.agent.category_service import CATEGORIES, CategoryService
 from 智能体.agent.report_service import ReportService
 from 智能体.agent.sentiment_service import SentimentService
-from 智能体.config_handler import agent_conf
+from 智能体.config_handler import admin_conf, agent_conf
 from 智能体.logger_hander import logger
 from 智能体.path_toll import get_abs_path
 from 智能体.rag import kb_service
+from 智能体.rag.rag_service import NO_KNOWLEDGE_ANSWER
 
 ROLES = ["普通用户", "管理员"]
 SESSION_SECRET = os.getenv("SESSION_SECRET")
@@ -112,6 +117,8 @@ def base_context(request: Request) -> dict:
         "session_id": session_id_of(request),
         "flash": request.query_params.get("flash") or "",
         "roles": ROLES,
+        # 演示用：把邀请码显示在注册表单旁，方便访客自行注册管理员体验功能
+        "invite_code": admin_conf["invite_code"],
     }
 
 
@@ -138,23 +145,99 @@ def needs_ticket(payload: dict) -> bool:
     return bool(payload.get("need_human")) or payload.get("category") == "退款"
 
 
-def handoff_notice(ticket: dict | None) -> str:
+def handoff_notice(ticket: dict | None, order: dict | None = None, stage: str = "") -> str:
     """工单提交后给用户看的明确告知：已提交、工单号、当前状态、后续由人工跟进。
 
-    直接拼在回答末尾，保证「建单即告知」，不依赖模型是否愿意提这件事。"""
+    直接拼在回答末尾，保证「建单即告知」，不依赖模型是否愿意提这件事。
+    订单核验结果一并写明，避免用户把「演示资格」误当成已经生效的退款结论。"""
     if not ticket:
         return ""
     verb = "已为您提交" if ticket.get("created") else "已为您更新"
+    verify = ""
+    if order:
+        verify = (
+            f"\n订单 {order['order_no']}（{order_service.DEMO_DATA_NOTICE}）"
+            f"核验结果：{order['refund_eligible']}。"
+        )
+    elif stage == "unverified":
+        # 无法核验时也必须由程序说明，不能只靠模型在回答里提一句
+        verify = "\n无法核验您提供的订单号（不存在、不属于当前用户或非演示订单），已转人工核实。"
     return (
         f"\n\n【人工工单】{verb}工单 #{ticket['id']}，当前状态：{ticket['status']}。"
-        "人工客服会核实您的诉求后跟进处理，具体处理结果请以人工回复为准。"
+        f"{verify}\n人工客服会核实您的诉求后跟进处理，具体处理结果请以人工回复为准。"
     )
 
 
-def with_handoff_notice(answer: str, ticket: dict | None) -> str:
+def with_handoff_notice(answer: str, ticket: dict | None,
+                        order: dict | None = None, stage: str = "") -> str:
     if not ticket or "【人工工单】" in answer:
         return answer
-    return answer + handoff_notice(ticket)
+    return answer + handoff_notice(ticket, order, stage)
+
+
+def prepare_support(session_id: str, question: str, payload: dict
+                    ) -> tuple[dict | None, dict | None, str]:
+    """退款核验 + 转人工工单：同步与流式共用同一份逻辑。
+
+    返回 (ticket, order, stage)：
+      - need_order：退款诉求但没有订单号，先询问用户，本轮不建单；
+      - verified：订单已通过演示适配器核验，按核验结果建单/更新工单；
+      - unverified：订单号无法核验，仍然转人工，由坐席核实；
+      - 空字符串：非退款诉求，按情绪分析的 need_human 决定是否建单。
+
+    退款资格只来自 order_service（程序依据演示数据返回），模型不参与判断。
+    """
+    if payload.get("category") == "退款":
+        # 先看本轮提问，再回看同一会话最近几轮，兼容「先报单号、下轮说退款」
+        order_no = (order_service.extract_order_no(question)
+                    or order_service.find_recent_order_no(session_id))
+        if not order_no:
+            return None, None, "need_order"
+
+        order = order_service.lookup(session_id, order_no)
+        if order:
+            reason = (
+                f"退款诉求，演示订单 {order['order_no']} 核验结果："
+                f"{order['refund_eligible']}（{order['eligibility_note']}），需人工确认处理"
+            )
+            stage = "verified"
+        else:
+            reason = (
+                f"退款诉求，订单号 {order_no} 无法核验"
+                "（不存在、不属于当前用户或非演示订单），需人工核实"
+            )
+            stage = "unverified"
+        # 订单号进工单是业务事实：即使程序判定不符合条件，也交由人工复核，
+        # 模型不能据此直接拒绝用户。
+        ticket_payload = {**payload, "need_human": True, "need_human_reason": reason}
+        return store.sync_handoff_ticket(session_id, question, ticket_payload), order, stage
+
+    if needs_ticket(payload):
+        return store.sync_handoff_ticket(session_id, question, payload), None, ""
+    return None, None, ""
+
+
+def recent_user_questions(session_id: str) -> list[str]:
+    """取本会话本轮之前的最近几条用户提问，供多轮追问推断商品分类"""
+    try:
+        history = store.conversation_history(session_id, limit=8)
+    except Exception as e:
+        logger.error(f"[recent_user_questions]读取会话历史失败，{str(e)}")
+        return []
+    questions = [m["content"] for m in history if m["role"] == "user"]
+    # 本轮提问已先写入记录，最后一条就是当前问题，预检索时不再重复拼入
+    return questions[:-1][-4:]
+
+
+def finalize_answer(answer: str, sources: list[str], ticket: dict | None,
+                    order: dict | None, knowledge: dict | None = None,
+                    stage: str = "") -> str:
+    """统一收尾：答案守卫 → 附引用来源 → 系统工单通知。
+
+    同步与流式都走这里；守卫在最前，避免模型的无依据回答被工单通知「包装」后显得可信。"""
+    return with_handoff_notice(
+        with_rag_sources(apply_guard(answer, knowledge or {}), sources), ticket, order, stage
+    )
 
 
 def ask_agent(messages: list[dict]) -> tuple[str, list[str]]:
@@ -188,21 +271,32 @@ def analyze_question(question: str) -> dict:
 
 
 def handle_turn(session_id: str, question: str, payload: dict) -> tuple[str, list[str]]:
-    """一轮完整问答：写入用户输入、必要时开转人工工单、调用 agent、写入回答"""
+    """一轮完整问答：写入用户输入、退款核验/建工单、调用 agent、写入回答"""
     # 把当前会话身份交给工具层，保证 get_user_id / get_user_location 用的是本会话
     set_current_session(session_id)
     record(session_id, "user", question, payload)
-    ticket = None
+    ticket, order, stage = None, None, ""
     try:
-        if needs_ticket(payload):
-            ticket = store.sync_handoff_ticket(session_id, question, payload)
+        ticket, order, stage = prepare_support(session_id, question, payload)
     except Exception as e:
         logger.error(f"[handle_turn]创建转人工工单失败，{str(e)}")
-    # 把本轮工单交给提示词，模型才会用真实工单号；没有工单时清空，避免串到下一轮
+    # 把本轮工单与退款核验结果交给提示词，模型才会用真实工单号与真实资格；
+    # 两者都没有时一并清空，避免串到下一轮。
     set_current_ticket(ticket)
+    set_current_order(order, stage)
 
-    answer, tools_used = ask_agent(agent_messages(session_id))
-    answer = with_handoff_notice(answer, ticket)
+    # 程序侧预检索：分类由程序推断，不再依赖模型传 category；
+    # 资料明确不足时直接拒答，省掉一次模型调用。
+    knowledge = prefetch_knowledge(
+        question, recent_questions=recent_user_questions(session_id)
+    )
+    set_current_knowledge(knowledge)
+    if should_call_agent(knowledge):
+        answer, tools_used = ask_agent(agent_messages(session_id))
+    else:
+        answer, tools_used = NO_KNOWLEDGE_ANSWER, []
+
+    answer = finalize_answer(answer, [], ticket, order, knowledge, stage)
     record(session_id, "assistant", answer, tools=tools_used)
     return answer, tools_used
 
@@ -302,6 +396,9 @@ def index(request: Request):
     context["messages"] = build_messages(rows, context["is_admin"])
     # 管理员为「本用户」生成过的报告，直接展示在他自己的问答页里
     context["my_reports"] = store.list_usage_reports(context["session_id"])
+    # 演示订单：合成数据，按当前会话初始化，供用户手工体验退款核验流程
+    context["demo_orders"] = order_service.list_demo_orders(context["session_id"])
+    context["demo_notice"] = order_service.DEMO_DATA_NOTICE
     return templates.TemplateResponse(request, "index.html", context)
 
 
@@ -329,11 +426,23 @@ async def stream_turn(session_id: str, question: str, admin: bool):
         payload = await run_in_threadpool(analyze_question, question)
 
         await run_in_threadpool(record, session_id, "user", question, payload)
-        ticket = None
-        if needs_ticket(payload):
-            ticket = await run_in_threadpool(store.sync_handoff_ticket, session_id, question, payload)
-        # 把本轮工单交给提示词，模型才会用真实工单号；没有工单时清空，避免串到下一轮
+        ticket, order = None, None
+        try:
+            # 与同步路径共用 prepare_support，保证退款核验、建单与告知完全一致
+            ticket, order, stage = await run_in_threadpool(
+                prepare_support, session_id, question, payload
+            )
+        except Exception as e:
+            logger.error(f"[stream_turn]创建转人工工单失败，{str(e)}")
+            stage = ""
+        # 把本轮工单与退款核验结果交给提示词；两者都没有时一并清空，避免串到下一轮
         set_current_ticket(ticket)
+        set_current_order(order, stage)
+
+        # 与同步路径共用预检索与守卫；资料不可用时不再调用 agent，也不推 token
+        recent_questions = await run_in_threadpool(recent_user_questions, session_id)
+        knowledge = await run_in_threadpool(prefetch_knowledge, question, recent_questions)
+        set_current_knowledge(knowledge)
 
         # 分析字段仅管理员可见，普通用户只收到「是否转人工」与工单信息
         analysis_html = ""
@@ -345,6 +454,12 @@ async def stream_turn(session_id: str, question: str, admin: bool):
             "ticket": ticket,
             "analysis_html": analysis_html if admin else "",
         })
+
+        if not should_call_agent(knowledge):
+            answer = finalize_answer(NO_KNOWLEDGE_ANSWER, [], ticket, order, knowledge, stage)
+            await run_in_threadpool(record, session_id, "assistant", answer, None, [])
+            yield sse("done", {"html": str(render_markdown(answer)), "tools_used": []})
+            return
 
         messages = await run_in_threadpool(agent_messages, session_id)
         texts, tools_used, rag_sources = [], [], []
@@ -370,8 +485,7 @@ async def stream_turn(session_id: str, question: str, admin: bool):
                 yield sse("token", content)
 
         answer = "".join(texts).strip() or "抱歉，我暂时没能理解这个问题，可以换个说法再问一次吗？"
-        answer = with_rag_sources(answer, rag_sources)
-        answer = with_handoff_notice(answer, ticket)
+        answer = finalize_answer(answer, rag_sources, ticket, order, knowledge, stage)
         await run_in_threadpool(record, session_id, "assistant", answer, None, tools_used)
         yield sse("done", {"html": str(render_markdown(answer)), "tools_used": tools_used})
     except Exception as e:
@@ -512,8 +626,10 @@ def admin_tickets(request: Request, status: str = "全部", session_id: str = ""
         return RedirectResponse("/", status_code=303)
     current = None if status in ("", "全部") else status
     context = base_context(request)
+    tickets = store.query_tickets(current, session_id or None)
     context.update({
-        "tickets": store.query_tickets(current, session_id or None),
+        "tickets": tickets,
+        "events": store.ticket_event_map([t["id"] for t in tickets]),
         "counts": store.ticket_counts(),
         "selected_status": status,
         "selected_session": session_id,
@@ -525,7 +641,7 @@ def admin_tickets(request: Request, status: str = "全部", session_id: str = ""
 @app.post("/admin/tickets/update")
 def admin_ticket_update(request: Request, ticket_id: int = Form(...), status: str = Form(...),
                         agent_name: str = Form(""), resolution: str = Form(""),
-                        close_reason: str = Form("")):
+                        close_reason: str = Form(""), back: str = Form("")):
     """推进工单状态，同时可记录责任人、处理记录与关闭原因"""
     if not is_admin(request):
         return RedirectResponse("/", status_code=303)
@@ -535,8 +651,41 @@ def admin_ticket_update(request: Request, ticket_id: int = Form(...), status: st
             (agent_name or "").strip() or None,
             (resolution or "").strip() or None,
             (close_reason or "").strip() or None,
+            operator=request.session.get("admin_user"),
         )
-    return RedirectResponse(f"/admin/tickets?flash={quote('工单状态已更新')}", status_code=303)
+    # 从详情页提交时留在详情页，回跳地址只接受本工单的固定路径，避免开放重定向
+    target = f"/admin/tickets/{ticket_id}" if back == f"/admin/tickets/{ticket_id}" else "/admin/tickets"
+    return RedirectResponse(f"{target}?flash={quote('工单状态已更新')}", status_code=303)
+
+
+@app.get("/admin/tickets/{ticket_id}")
+def admin_ticket_detail(request: Request, ticket_id: int):
+    """工单详情：该用户在同一会话里的完整对话记录 + 工单操作"""
+    if not is_admin(request):
+        return RedirectResponse("/", status_code=303)
+    ticket = store.get_ticket(ticket_id)
+    if not ticket:
+        return RedirectResponse(
+            f"/admin/tickets?flash={quote('工单不存在或已被删除')}", status_code=303
+        )
+
+    # query_turns 返回倒序，这里翻回正序，和问答页的阅读顺序一致
+    rows = store.query_turns(session_id=ticket["session_id"], limit=200) \
+        if ticket["session_id"] else []
+    ticket_ref = {ticket["session_id"]: {"id": ticket["id"], "status": ticket["status"]}}
+    messages = [message_dict(row, True, ticket_ref) for row in reversed(rows)]
+    for message, row in zip(messages, reversed(rows)):
+        message["time"] = row["created_at"]
+
+    context = base_context(request)
+    context.update({
+        "ticket": ticket,
+        "messages": messages,
+        "total": len(rows),
+        "events": store.ticket_events(ticket_id),
+        "statuses": store.TICKET_STATUSES,
+    })
+    return templates.TemplateResponse(request, "ticket_detail.html", context)
 
 
 # ============================================================

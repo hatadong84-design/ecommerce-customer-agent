@@ -15,16 +15,19 @@ body {
   top: 12px;
   left: 12px;
   z-index: 20;
-  width: 40px;
+  width: 34px;
   height: 34px;
   padding: 0;
-  font-size: 16px;
-  line-height: 1;
-  background: #ffffff;
-  color: #1f2933;
-  border: 1px solid #cfd6e0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: #111827;
+  border: none;
+  border-radius: 8px;
 }
-.sidebar-toggle:hover { background: #eff4ff; }
+.sidebar-toggle svg { display: block; }
+.sidebar-toggle:hover { background: #e9eef6; }
 
 /* 左侧栏：左上角是角色切换 */
 .sidebar {
@@ -104,6 +107,8 @@ button:hover { background: #1d4ed8; }
 .msg.user .bubble { background: #dbeafe; }
 .msg.assistant .bubble { background: #fff; border: 1px solid #e4e8ee; white-space: normal; }
 .tools { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+.msg-time { font-size: 12px; color: #9ca3af; margin-bottom: 4px; }
+.msg.user .msg-time { text-align: right; }
 
 /* 普通用户视角的转人工提示 */
 .handoff-tag {
@@ -170,6 +175,23 @@ button:hover { background: #1d4ed8; }
   line-height: 1.7;
 }
 
+/* 演示订单：合成数据，仅用于演示退款核验 */
+.demo-orders { margin: 18px 0; }
+.demo-orders details {
+  background: #fff;
+  border: 1px solid #e4e8ee;
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+.demo-orders summary { cursor: pointer; font-weight: 600; }
+.demo-order-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+.demo-order-table th, .demo-order-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid #eef1f5;
+}
+.demo-order-table th { color: #6b7280; font-weight: 600; }
+
 /* 管理后台 */
 .stats { display: flex; gap: 14px; flex-wrap: wrap; margin: 18px 0; }
 .card {
@@ -235,6 +257,13 @@ button:hover { background: #1d4ed8; }
 .ticket-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .ticket-question { margin: 6px 0; line-height: 1.6; }
 
+/* 工单卡片整块可点开详情；表单与变更记录保持原有交互 */
+.ticket-clickable { cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.ticket-clickable:hover { border-color: #bfd3fb; box-shadow: 0 2px 8px rgba(37, 99, 235, .08); }
+.ticket-clickable form, .ticket-clickable details { cursor: default; }
+.ticket-open-hint { margin-left: auto; font-size: 13px; color: #2563eb; }
+.ticket-open-hint::after { content: " ›"; }
+
 .badge {
   padding: 2px 10px;
   border-radius: 999px;
@@ -256,6 +285,12 @@ button:hover { background: #1d4ed8; }
   color: #111827;
 }
 .ticket-actions textarea { resize: vertical; }
+
+/* 工单变更记录：只做轻量展示，不抢主状态与操作区 */
+.ticket-history { margin-top: 10px; font-size: 13px; color: #4b5563; }
+.ticket-history summary { cursor: pointer; color: #2563eb; }
+.ticket-history ol { margin: 8px 0 0; padding-left: 22px; }
+.ticket-history li { margin-bottom: 4px; line-height: 1.6; }
 
 /* 从管理后台的会话直接跳到对应工单 */
 .ticket-link {

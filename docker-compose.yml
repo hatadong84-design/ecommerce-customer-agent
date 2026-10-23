@@ -6,15 +6,16 @@ services:
     ports:
       - "5432:5432"
     environment:
-      # 本地开发用默认值即可；公开部署时通过环境变量覆盖，不要把真实口令写死进仓库
-      POSTGRES_USER: ${POSTGRES_USER:-agent}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent123456}
-      POSTGRES_DB: ${POSTGRES_DB:-agent}
+      # 全部从项目根目录的 .env 注入；缺失时 compose 直接报错，不再回退到仓库内的默认口令
+      POSTGRES_USER: ${POSTGRES_USER:?请在 .env 中设置 POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?请在 .env 中设置 POSTGRES_DB}
       TZ: Asia/Shanghai
     volumes:
       - agent_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent} -d ${POSTGRES_DB:-agent}"]
+      # 用 $$ 让变量在容器内展开，避免依赖宿主机环境变量
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 3s
       retries: 10

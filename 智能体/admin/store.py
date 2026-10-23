@@ -1,7 +1,9 @@
 import csv
+import hashlib
 import io
 import os
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
 import psycopg
@@ -61,6 +63,22 @@ SCHEMA_STATEMENTS = [
     # 工单处理闭环：责任人（agent_name 已有）、处理记录、关闭原因，用 ALTER 幂等补列
     "ALTER TABLE handoff_ticket ADD COLUMN IF NOT EXISTS resolution TEXT",
     "ALTER TABLE handoff_ticket ADD COLUMN IF NOT EXISTS close_reason TEXT",
+    # 工单变更留痕：每次建单、状态变更、补充处理记录都追加一条事件，
+    # 只追加不更新，保证「谁在什么时候改了什么」可追溯。
+    """
+    CREATE TABLE IF NOT EXISTS handoff_ticket_event (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        ticket_id BIGINT NOT NULL,
+        session_id TEXT,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        operator TEXT,
+        agent_name TEXT,
+        note TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ticket_event_ticket ON handoff_ticket_event (ticket_id)",
     """
     CREATE TABLE IF NOT EXISTS kb_category (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -106,6 +124,25 @@ SCHEMA_STATEMENTS = [
     """,
     # 访客编号序列：新访客依次拿到 用户1001、用户1002……
     "CREATE SEQUENCE IF NOT EXISTS user_id_seq START 1001",
+    # 演示订单：合成数据，按会话绑定，只用于演示退款核验流程。
+    # 同一订单号在不同会话下各自独立，查询时强制带 session_id，
+    # 因此跨会话永远查不到别人的订单。
+    """
+    CREATE TABLE IF NOT EXISTS demo_order (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        order_no TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        product TEXT NOT NULL,
+        amount NUMERIC(10, 2) NOT NULL,
+        purchased_at TEXT NOT NULL,
+        order_status TEXT NOT NULL,
+        refund_eligible TEXT NOT NULL,
+        eligibility_note TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (session_id, order_no)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_demo_order_session ON demo_order (session_id)",
 ]
 
 # 知识库文档的来源类型（上传的文件格式，或后台手工录入）
@@ -122,6 +159,10 @@ TICKET_STATUSES = ["待接入", "处理中", "已解决"]
 
 # 访客在界面上按「用户NNNN」展示，编号由数据库序列分配，从 1001 起
 USER_ID_PREFIX = "用户"
+
+# 演示订单的退款资格：由程序依据合成数据给出，不接受模型自行判断
+REFUND_ELIGIBLE = "符合演示退款条件"
+REFUND_INELIGIBLE = "不符合演示退款条件"
 
 # chat_log 的字段顺序，插入与导出 CSV 都按它来
 COLUMNS = [
@@ -280,11 +321,25 @@ def conversation_history(session_id: str, limit: int = 20) -> list[dict[str, str
     return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
 
 
+def _write_ticket_event(conn, ticket_id: int, session_id: str | None,
+                        from_status: str | None, to_status: str,
+                        operator: str | None = None, agent_name: str | None = None,
+                        note: str | None = None, now: str | None = None) -> None:
+    """在同一个连接/事务里追加一条工单事件，与主表更新一起提交或回滚"""
+    conn.execute(
+        "INSERT INTO handoff_ticket_event (ticket_id, session_id, from_status, to_status, "
+        "operator, agent_name, note, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (ticket_id, session_id, from_status, to_status, operator, agent_name, note,
+         now or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+
+
 def sync_handoff_ticket(session_id: str, question: str, sentiment: Mapping[str, Any]) -> dict[str, Any]:
     """命中转人工时：该会话已有未解决工单就刷新它，否则新建一张待接入工单。
 
     返回该会话当前的工单信息（id / status / created），供 Web 层明确告知用户
     「工单已提交、当前处于什么状态」，而不是让问答像普通聊天一样结束。
+    建单与复用都会写一条事件，保证工单从出现的那一刻起就有记录。
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     reason = sentiment.get("need_human_reason")
@@ -292,7 +347,7 @@ def sync_handoff_ticket(session_id: str, question: str, sentiment: Mapping[str, 
     emotion = sentiment.get("emotion")
     with connect() as conn:
         existing = conn.execute(
-            "SELECT id FROM handoff_ticket "
+            "SELECT id, status FROM handoff_ticket "
             "WHERE session_id = %s AND status <> %s ORDER BY id DESC LIMIT 1",
             (session_id, TICKET_STATUSES[-1]),
         ).fetchone()
@@ -302,16 +357,21 @@ def sync_handoff_ticket(session_id: str, question: str, sentiment: Mapping[str, 
                 "emotion = %s, updated_at = %s WHERE id = %s",
                 (question, reason, urgency, emotion, now, existing["id"]),
             )
-            row = conn.execute(
-                "SELECT id, status FROM handoff_ticket WHERE id = %s", (existing["id"],)
-            ).fetchone()
-            return {"id": row["id"], "status": row["status"], "created": False}
+            _write_ticket_event(
+                conn, existing["id"], session_id, existing["status"], existing["status"],
+                operator="system", note="重复诉求，复用未关闭工单", now=now,
+            )
+            return {"id": existing["id"], "status": existing["status"], "created": False}
         row = conn.execute(
             "INSERT INTO handoff_ticket (session_id, question, reason, urgency, emotion, "
             "status, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
             "RETURNING id, status",
             (session_id, question, reason, urgency, emotion, TICKET_STATUSES[0], now, now),
         ).fetchone()
+        _write_ticket_event(
+            conn, row["id"], session_id, None, row["status"],
+            operator="system", note="用户诉求触发转人工", now=now,
+        )
         return {"id": row["id"], "status": row["status"], "created": True}
 
 
@@ -347,21 +407,82 @@ def query_tickets(status: str | None = None, session_id: str | None = None,
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
+def get_ticket(ticket_id: int) -> dict[str, Any] | None:
+    """按 id 取单张工单，用于工单详情页"""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM handoff_ticket WHERE id = %s", (ticket_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def set_ticket_status(ticket_id: int, status: str, agent_name: str | None = None,
                       resolution: str | None = None,
-                      close_reason: str | None = None) -> None:
+                      close_reason: str | None = None,
+                      operator: str | None = None) -> None:
     """推进工单状态，并可选记录责任人（坐席）、处理记录与关闭原因。
 
     agent_name / resolution / close_reason 传 None 时保留原值（COALESCE），
-    避免只是改个状态就把已经写好的处理记录清空。"""
+    避免只是改个状态就把已经写好的处理记录清空。
+    主表更新与事件写入在同一个事务里完成，行锁保证 from_status 读到的是真实旧值。"""
     with connect() as conn:
+        current = conn.execute(
+            "SELECT status, session_id, agent_name, resolution, close_reason "
+            "FROM handoff_ticket WHERE id = %s FOR UPDATE",
+            (ticket_id,),
+        ).fetchone()
+        if not current:
+            return
+
+        # 表单会把已有内容回填，只有「值与库里不同」才算一次变更，
+        # 避免后台重复点保存刷出内容相同的事件。
+        new_agent = agent_name if agent_name != current["agent_name"] else None
+        new_resolution = resolution if resolution != current["resolution"] else None
+        new_close = close_reason if close_reason != current["close_reason"] else None
+        if (current["status"] == status
+                and not any([new_agent, new_resolution, new_close])):
+            return
+
         conn.execute(
             "UPDATE handoff_ticket SET status = %s, agent_name = COALESCE(%s, agent_name), "
             "resolution = COALESCE(%s, resolution), close_reason = COALESCE(%s, close_reason), "
             "updated_at = %s WHERE id = %s",
-            (status, agent_name, resolution, close_reason,
+            (status, new_agent, new_resolution, new_close,
              datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ticket_id),
         )
+        _write_ticket_event(
+            conn, ticket_id, current["session_id"], current["status"], status,
+            operator=operator or "system",
+            agent_name=new_agent or current["agent_name"],
+            note=new_resolution or new_close
+            or ("状态更新" if status != current["status"] else "更新责任人"),
+        )
+
+
+def ticket_events(ticket_id: int) -> list[dict[str, Any]]:
+    """某张工单的全部变更记录，按发生顺序正序"""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM handoff_ticket_event WHERE ticket_id = %s ORDER BY id",
+            (ticket_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def ticket_event_map(ticket_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    """一次查出多张工单的变更记录，供工单页批量展示"""
+    if not ticket_ids:
+        return {}
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM handoff_ticket_event WHERE ticket_id = ANY(%s::bigint[]) "
+            "ORDER BY ticket_id, id",
+            (list(ticket_ids),),
+        ).fetchall()
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(row["ticket_id"], []).append(dict(row))
+    return grouped
 
 
 def ticket_counts() -> dict[str, int]:
@@ -549,6 +670,91 @@ def set_user_city(session_id: str, city: str) -> None:
             "city = EXCLUDED.city, updated_at = EXCLUDED.updated_at",
             (session_id, city, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
+
+
+# ============================================================
+# 演示订单：合成数据，按会话绑定，仅用于演示退款核验流程
+# ------------------------------------------------------------
+# 不连接任何真实电商平台，也不执行退款；查询一律带 session_id，
+# 保证某个会话拿不到另一个会话的订单。
+# ============================================================
+def demo_order_no(session_id: str, seq: int) -> str:
+    """生成演示订单号，形如 DEMO-1001-01。
+
+    编号带上会话的数字部分，便于手工输入；会话没有数字时用短哈希占位。
+    同一个编号在不同会话下也是相互独立的记录（唯一约束是会话 + 订单号）。
+    """
+    digits = "".join(ch for ch in (session_id or "") if ch.isdigit())
+    if digits:
+        code = digits[-6:]
+    else:
+        code = hashlib.sha1((session_id or "demo").encode("utf-8")).hexdigest()[:6].upper()
+    return f"DEMO-{code}-{seq:02d}"
+
+
+# 每个会话初始化的两条演示订单：一条符合、一条不符合演示退款条件，
+# 这样既能演示「核验通过」，也能演示「程序判定不符合仍需人工复核」。
+DEMO_ORDER_DRAFTS = [
+    ("扫地机器人 X1 Pro", Decimal("2499.00"), "2026-10-10", "已签收",
+     REFUND_ELIGIBLE, "演示数据：签收 7 天内且未拆封"),
+    ("随行保温杯 500ml", Decimal("129.00"), "2026-09-01", "已签收",
+     REFUND_INELIGIBLE, "演示数据：已超过演示退货期且已使用"),
+]
+
+_ORDER_FIELDS = ("order_no, product, amount, purchased_at, order_status, "
+                 "refund_eligible, eligibility_note")
+
+
+def ensure_demo_orders(session_id: str) -> list[dict[str, Any]]:
+    """返回当前会话的演示订单；首次调用时初始化两条合成订单。
+
+    只查 session_id 对应的记录，不返回其他会话的订单。
+    """
+    if not session_id:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT {_ORDER_FIELDS} FROM demo_order WHERE session_id = %s ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        if rows:
+            return [dict(row) for row in rows]
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for seq, (product, amount, purchased_at, order_status,
+                  eligible, note) in enumerate(DEMO_ORDER_DRAFTS, 1):
+            conn.execute(
+                "INSERT INTO demo_order (order_no, session_id, product, amount, "
+                "purchased_at, order_status, refund_eligible, eligibility_note, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (session_id, order_no) DO NOTHING",
+                (demo_order_no(session_id, seq), session_id, product, amount,
+                 purchased_at, order_status, eligible, note, now),
+            )
+        rows = conn.execute(
+            f"SELECT {_ORDER_FIELDS} FROM demo_order WHERE session_id = %s ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_demo_order(session_id: str, order_no: str) -> dict[str, Any] | None:
+    """按订单号查询当前会话的演示订单。
+
+    强制同时匹配 session_id：订单不存在、属于其他会话或不是演示订单，
+    统一返回 None，由调用方给出「无法核验」的相同提示，避免泄露订单是否存在。
+    """
+    # 去掉用户输入里的空格差异，再按大写比对；仍是同会话内查询
+    normalized = "".join((order_no or "").split()).upper()
+    if not session_id or not normalized:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            f"SELECT {_ORDER_FIELDS} FROM demo_order "
+            "WHERE session_id = %s AND UPPER(order_no) = %s",
+            (session_id, normalized),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def stats() -> dict[str, Any]:

@@ -3,6 +3,7 @@
 {% macro render_message(m) %}
   {% if m.role == 'user' %}
     <div class="msg user">
+      {% if m.time %}<div class="msg-time">{{ m.time }}</div>{% endif %}
       <div class="bubble">{{ m.content }}</div>
       {% if m.sentiment %}
         {{ analysis.render_analysis(m.sentiment, m.open, m.ticket, m.session_id) }}
@@ -12,6 +13,7 @@
     </div>
   {% else %}
     <div class="msg assistant">
+      {% if m.time %}<div class="msg-time">{{ m.time }}</div>{% endif %}
       {% if m.tools_used %}<div class="tools">调用工具：{{ m.tools_used }}</div>{% endif %}
       <div class="bubble md">{{ m.content | md }}</div>
     </div>

@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% import "_message.html" as ui %}
+{% block title %}工单 #{{ ticket.id }} · 对话记录{% endblock %}
+{% block content %}
+{% set badge = {'待接入': 'pending', '处理中': 'processing', '已解决': 'done'} %}
+<p><a class="btn" href="/admin/tickets">← 返回工单列表</a></p>
+
+<section class="thread ticket-conversation">
+  <div class="thread-head">
+    <strong>工单 #{{ ticket.id }} · {{ ticket.session_id or '（无用户）' }} 的对话记录</strong>
+    <span class="badge badge-{{ badge.get(ticket.status, '') }}">{{ ticket.status }}</span>
+    <span class="hint">紧急 {{ ticket.urgency or '—' }} ｜ 情绪 {{ ticket.emotion or '—' }}
+      ｜ 创建 {{ ticket.created_at }} ｜ 责任人 {{ ticket.agent_name or '未指派' }}</span>
+  </div>
+  {% if messages %}
+  <div class="chat">
+    {% for m in messages %}{{ ui.render_message(m) }}{% endfor %}
+  </div>
+  <p class="hint">共 {{ total }} 条记录{% if total >= 200 %}（仅显示最近 200 条）{% endif %}</p>
+  {% else %}
+  <p class="hint">该用户暂无对话记录。</p>
+  {% endif %}
+</section>
+
+<section class="ticket">
+  <div class="ticket-head"><strong>工单信息与处理</strong></div>
+  <p class="ticket-question">{{ ticket.question }}</p>
+  <p class="hint">转接理由：{{ ticket.reason or '—' }}</p>
+  <p class="hint">创建 {{ ticket.created_at }} ｜ 更新 {{ ticket.updated_at }}
+    ｜ 责任人：{{ ticket.agent_name or '未指派' }}</p>
+  {% if ticket.resolution %}<p class="hint">处理记录：{{ ticket.resolution }}</p>{% endif %}
+  {% if ticket.close_reason %}<p class="hint">关闭原因：{{ ticket.close_reason }}</p>{% endif %}
+  <details class="ticket-history">
+    <summary>变更记录（{{ events|length }}）</summary>
+    {% if events %}
+    <ol>
+      {% for e in events %}
+      <li>{{ e.created_at }} · {{ e.operator or 'system' }} · {{ e.from_status or '—' }} → {{ e.to_status }}{% if e.note %} · {{ e.note }}{% endif %}</li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="hint">暂无变更记录</p>
+    {% endif %}
+  </details>
+  <form class="ticket-actions" method="post" action="/admin/tickets/update">
+    <input type="hidden" name="ticket_id" value="{{ ticket.id }}">
+    <input type="hidden" name="back" value="/admin/tickets/{{ ticket.id }}">
+    <label>责任人 <input name="agent_name" value="{{ ticket.agent_name or '' }}" placeholder="如：客服小李"></label>
+    <label>转为
+      <select name="status">
+        {% for s in statuses %}<option value="{{ s }}" {% if s == ticket.status %}selected{% endif %}>{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="wide">处理记录
+      <textarea name="resolution" rows="2" placeholder="记录核实过程与处理结果，如：已核对订单 #20260812，符合七天无理由，已发起退款">{{ ticket.resolution or '' }}</textarea>
+    </label>
+    <label class="wide">关闭原因
+      <input name="close_reason" value="{{ ticket.close_reason or '' }}" placeholder="关闭时填写，如：已与用户确认解决 / 用户撤销诉求">
+    </label>
+    <button type="submit">更新工单</button>
+  </form>
+</section>
+{% endblock %}

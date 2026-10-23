@@ -9,6 +9,7 @@ from langchain_core.tools import tool
 
 from 智能体.admin import store
 from 智能体.admin.store import USER_ID_PREFIX
+from 智能体.agent import order_service
 from 智能体.config_handler import agent_conf
 from 智能体.logger_hander import logger
 from 智能体.path_toll import get_abs_path
@@ -49,6 +50,41 @@ def current_ticket() -> dict:
     return _current_ticket.get()
 
 
+# 本轮退款核验上下文：订单（演示数据）与所处阶段。
+# 阶段取值：need_order（缺订单号）/ verified（已核验）/ unverified（无法核验）。
+# Web 层在调用智能体前写入，提示词据此约束模型，不允许它自行判断退款资格。
+_current_order: ContextVar[dict] = ContextVar("current_order", default={})
+_current_refund_stage: ContextVar[str] = ContextVar("current_refund_stage", default="")
+
+
+def set_current_order(order: dict | None, stage: str = "") -> None:
+    """记录本轮退款核验结果；没有退款诉求时传 None 清空，防止串到下一轮"""
+    _current_order.set(order or {})
+    _current_refund_stage.set(stage or "")
+
+
+def current_order() -> dict:
+    return _current_order.get()
+
+
+def current_refund_stage() -> str:
+    return _current_refund_stage.get()
+
+
+# 本轮程序侧预检索的资料。Web 层与评测脚本在调用智能体前写入，
+# 提示词据此直接引用，不再依赖模型自己决定是否检索、传什么分类。
+_current_knowledge: ContextVar[dict] = ContextVar("current_knowledge", default={})
+
+
+def set_current_knowledge(knowledge: dict | None) -> None:
+    """记录本轮预检索结果；没有预检索时传 None 清空，防止串到下一轮"""
+    _current_knowledge.set(knowledge or {})
+
+
+def current_knowledge() -> dict:
+    return _current_knowledge.get()
+
+
 # Open-Meteo（免费、免 key）：先地理编码拿经纬度，再查实时天气
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -80,6 +116,17 @@ def _http_get_json(url: str, params: dict, timeout: int = 8) -> dict:
 @tool(description="从专业知识库检索参考资料；category 为商品分类（如「扫地机器人」），不确定时留空")
 def rag_summarize(query: str, category: str = "") -> str:
     return rag.rag_summarize(query, category or "")
+
+
+@tool(description="按订单号查询当前用户的演示订单（仅支持演示订单，如 DEMO-1001-01）；"
+                  "查不到或不属于当前用户时统一返回「无法核验」")
+def lookup_demo_order(order_no: str) -> str:
+    """演示订单查询：只返回当前会话的合成订单，绝不出让其他会话的数据"""
+    order = order_service.lookup(current_session_id(), order_no)
+    if not order:
+        return ("无法核验该订单号：订单不存在、不属于当前用户，或不是演示订单。"
+                "请核对订单号后重试，或说明需要人工核实。")
+    return order_service.describe(order)
 
 
 # 检索结果里引用来源的标记，Web 层据此把来源随答案一起呈现给用户

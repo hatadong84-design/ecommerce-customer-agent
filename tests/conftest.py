@@ -66,7 +66,7 @@ def clean_db(store):
     """每个用例前清空业务数据，保证用例之间互不干扰（只在测试库执行）"""
     with store.connect() as conn:
         conn.execute(
-            "TRUNCATE admin_user, chat_log, handoff_ticket, usage_report, user_profile "
-            "RESTART IDENTITY CASCADE"
+            "TRUNCATE admin_user, chat_log, handoff_ticket, handoff_ticket_event, "
+            "usage_report, user_profile, demo_order RESTART IDENTITY CASCADE"
         )
     return store

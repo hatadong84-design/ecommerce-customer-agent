@@ -16,7 +16,7 @@ from 智能体.agent.sentiment_service import SentimentService, SentimentResult
 from 智能体.config_handler import agent_conf
 from 智能体.path_toll import get_abs_path
 
-st.set_page_config(page_title="扫地机器人智能助手", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="电商智能助手", layout="wide", initial_sidebar_state="expanded")
 
 # 角色状态与左上角的角色切换控件必须先于页面内容渲染
 admin_ui.init_state()
@@ -134,7 +134,7 @@ def render_report():
     st.markdown(report)
 
 
-st.title("扫地机器人智能助手")
+st.title("电商智能助手")
 # 「管理后台」只对已登录管理员动态生成
 labels = ["智能问答", "使用报告"] + (["管理后台"] if admin_ui.is_admin() else [])
 tabs = dict(zip(labels, st.tabs(labels)))

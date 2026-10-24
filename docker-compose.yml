@@ -21,5 +21,32 @@ services:
       retries: 10
       start_period: 10s
 
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent-web
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      SESSION_SECRET: ${SESSION_SECRET:?请在 .env 中设置 SESSION_SECRET}
+      ADMIN_INVITE_CODE: ${ADMIN_INVITE_CODE:?请在 .env 中设置 ADMIN_INVITE_CODE}
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:?请在 .env 中设置 SILICONFLOW_API_KEY}
+      SILICONFLOW_BASE_URL: ${SILICONFLOW_BASE_URL:-https://api.siliconflow.cn/v1}
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:?请在 .env 中设置 POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?请在 .env 中设置 POSTGRES_DB}
+      TZ: Asia/Shanghai
+    volumes:
+      - agent_chroma:/app/智能体/rag/chroma_db
+
 volumes:
   agent_pgdata:
+  agent_chroma:

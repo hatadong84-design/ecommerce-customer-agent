@@ -2,6 +2,7 @@ import os
 
 import yaml
 from dotenv import load_dotenv
+from psycopg.conninfo import make_conninfo
 from 智能体.path_toll import get_abs_path
 
 # 加载项目根目录下的 .env，让密钥等敏感配置不写进代码
@@ -82,6 +83,16 @@ if _missing:
 
 # 数据库连接串优先从环境变量读取，仓库里的 db.yml 不再存放真实连接串
 db_conf["dsn"] = os.getenv("DATABASE_URL") or db_conf.get("dsn") or ""
+if not db_conf["dsn"]:
+    db_host = os.getenv("DB_HOST")
+    db_user = os.getenv("POSTGRES_USER")
+    db_password = os.getenv("POSTGRES_PASSWORD")
+    db_name = os.getenv("POSTGRES_DB")
+    if db_host and db_user and db_password and db_name:
+        db_conf["dsn"] = make_conninfo(
+            host=db_host, port=os.getenv("DB_PORT", "5432"),
+            user=db_user, password=db_password, dbname=db_name,
+        )
 if not db_conf["dsn"]:
     raise RuntimeError(
         "缺少 DATABASE_URL 环境变量，请在项目根目录的 .env 中配置数据库连接串（可参考 .env.example）"

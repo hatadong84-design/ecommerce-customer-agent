@@ -2,7 +2,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Optional
 from langchain_core.embeddings import Embeddings
-from langchain_community.chat_models.tongyi import BaseChatModel
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from 智能体.config_handler import rag_conf
 

@@ -1,6 +1,10 @@
+from time import perf_counter
+
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 
+from 智能体.admin import store
+from 智能体.logger_hander import logger
 from 智能体.model.factory import chat_model
 from 智能体.prompt_loader import load_rag_summarize_prompts
 from 智能体.rag.vector_store import VectorStoreService
@@ -15,15 +19,13 @@ NO_KNOWLEDGE_ANSWER = (
     "你可以补充具体的型号或使用场景，或申请转人工客服，由人工协助处理。"
 )
 
+KNOWLEDGE_UNAVAILABLE_ANSWER = (
+    "知识库服务暂时不可用，当前无法核实这个问题。请稍后重试，"
+    "或申请转人工客服，由人工协助处理。"
+)
+
 # 引用来源的标记：Web 层据此把来源随答案一起呈现给用户
 RAG_SOURCE_PREFIX = "参考来源："
-
-
-def print_prompt(prompt):
-    print("="*20)
-    print(prompt.to_string())
-    print("=" * 20)
-    return prompt
 
 
 class RagSummarizeService(object):
@@ -35,7 +37,7 @@ class RagSummarizeService(object):
         self.chain = self._init_chain()
 
     def _init_chain(self):
-        chain = self.prompt_template | print_prompt | self.model | StrOutputParser()
+        chain = self.prompt_template | self.model | StrOutputParser()
         return chain
 
     def _source_of(self, doc) -> str:
@@ -43,11 +45,21 @@ class RagSummarizeService(object):
 
     def retriever_docs(self, query: str, category: str | None = None) -> list:
         """检索并按相关度门槛过滤；低相关的结果直接丢弃"""
+        count_chunks = getattr(self.vector_store, "count_chunks", None)
+        if count_chunks and count_chunks() == 0:
+            if store.kb_document_total() > 0:
+                raise RuntimeError("知识库存在文档但 Chroma 向量集合为空")
+            return []
         scored = self.vector_store.retrieve_with_scores(query, category=category)
         return [doc for doc, score in scored if score >= RELEVANCE_THRESHOLD]
 
     def rag_summarize(self, query: str, category: str = "") -> str:
+        retrieval_started = perf_counter()
         context_docs = self.retriever_docs(query, category or None)
+        retrieval_ms = (perf_counter() - retrieval_started) * 1000
+        logger.info(
+            f"[RAG]检索完成：片段数 {len(context_docs)}，耗时 {retrieval_ms:.1f} ms"
+        )
 
         # 检索不到可靠资料时如实告知，并给出后续处理方式，不编造答案
         if not context_docs:
@@ -61,7 +73,10 @@ class RagSummarizeService(object):
             if source not in sources:
                 sources.append(source)
 
+        generation_started = perf_counter()
         answer = self.chain.invoke({"input": query, "context": context})
+        generation_ms = (perf_counter() - generation_started) * 1000
+        logger.info(f"[RAG]生成完成：耗时 {generation_ms:.1f} ms")
         # 回答末尾附上引用来源，让答案可追溯
         return f"{answer}\n\n{RAG_SOURCE_PREFIX}{'、'.join(sources)}"
 

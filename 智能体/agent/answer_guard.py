@@ -12,7 +12,12 @@ from 智能体.admin import store
 from 智能体.logger_hander import logger
 from 智能体.model.factory import chat_model
 from 智能体.prompt_loader import load_answer_guard_prompts
-from 智能体.rag.rag_service import NO_KNOWLEDGE_ANSWER, RAG_SOURCE_PREFIX, RagSummarizeService
+from 智能体.rag.rag_service import (
+    KNOWLEDGE_UNAVAILABLE_ANSWER,
+    NO_KNOWLEDGE_ANSWER,
+    RAG_SOURCE_PREFIX,
+    RagSummarizeService,
+)
 
 # 用户口语 -> 知识库商品分类。只在对应分类真实存在时才生效，
 # 管理员改了分类名也不会把请求路由到不存在的分类。
@@ -76,10 +81,20 @@ def unknown_product(text: str, categories: list[str] | None = None) -> bool:
     return False
 
 
+def looks_product_related(text: str) -> bool:
+    """知识库分类表暂时不可读时，识别常见商品问题并采用安全降级。"""
+    value = str(text or "").lower()
+    aliases = (alias for group in CATEGORY_ALIASES.values() for alias in group)
+    return any(alias.lower() in value for alias in aliases) or any(
+        hint in value for hint in PRODUCT_HINTS
+    )
+
+
 def judge_answerable(question: str, docs: list, model=None) -> tuple[bool, str]:
     """让模型只回答「资料够不够」，返回 (是否可用, 原因)。
 
-    审核模型异常或输出不合规时 fail-open：宁可放行一次，也不让整站拒答。
+    审核模型异常或输出不合规时，允许使用已经通过相关度门槛的检索资料继续回答；
+    检索失败时由预检索流程拒答，避免退回模型常识回答商品问题。
     """
     if not docs:
         return False, "没有检索到资料"
@@ -93,14 +108,14 @@ def judge_answerable(question: str, docs: list, model=None) -> tuple[bool, str]:
         chain = prompt | (model or chat_model) | StrOutputParser()
         verdict = chain.invoke({"question": question, "context": context}).strip()
     except Exception as e:
-        logger.error(f"[judge_answerable]资料可用性判断失败，按可用放行：{str(e)}")
+        logger.error(f"[judge_answerable]资料可用性判断失败，使用已过相关度门槛的资料：{str(e)}")
         return True, ""
 
     if verdict.startswith("不可用"):
         return False, verdict[:60]
     if verdict.startswith("可用"):
         return True, ""
-    logger.warning(f"[judge_answerable]审核模型输出不合规，按可用放行：{verdict[:60]}")
+    logger.warning(f"[judge_answerable]审核模型输出不合规，使用已过相关度门槛的资料：{verdict[:60]}")
     return True, ""
 
 
@@ -113,10 +128,11 @@ def prefetch_knowledge(question: str, recent_questions: list[str] | None = None,
     """
     empty = {"checked": False, "category": None, "docs": [], "sources": [],
              "answerable": False, "reason": ""}
+    category = None
+    text = " ".join([question] + list(recent_questions or []))
     try:
         if categories is None:
             categories = [c["name"] for c in store.list_kb_categories()]
-        text = " ".join([question] + list(recent_questions or []))
         category = infer_category(text, categories)
         if not category:
             if unknown_product(text, categories):
@@ -139,7 +155,16 @@ def prefetch_knowledge(question: str, recent_questions: list[str] | None = None,
         return {"checked": True, "category": category, "docs": docs, "sources": sources,
                 "answerable": answerable, "reason": reason}
     except Exception as e:
-        logger.error(f"[prefetch_knowledge]预检索失败，跳过守卫：{str(e)}")
+        logger.error(f"[prefetch_knowledge]预检索失败：{str(e)}")
+        if category or looks_product_related(text):
+            return {
+                "checked": True,
+                "category": category,
+                "docs": [],
+                "sources": [],
+                "answerable": False,
+                "reason": "knowledge_service_unavailable",
+            }
         return empty
 
 
@@ -155,6 +180,8 @@ def apply_guard(answer: str, knowledge: dict | None) -> str:
     if not knowledge.get("checked"):
         return answer
     if not knowledge.get("answerable"):
+        if knowledge.get("reason") == "knowledge_service_unavailable":
+            return KNOWLEDGE_UNAVAILABLE_ANSWER
         return NO_KNOWLEDGE_ANSWER
     sources = knowledge.get("sources") or []
     if sources and RAG_SOURCE_PREFIX not in answer:

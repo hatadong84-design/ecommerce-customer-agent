@@ -1,105 +1,141 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "_message.html" as ui %}
+
+{% if not messages %}
+<section class="welcome-panel">
+  <div class="welcome-copy">
+    <span class="welcome-kicker"><span class="status-dot"></span>智能售后服务</span>
+    <h2>您好，需要什么帮助？</h2>
+    <p>可以咨询商品使用与故障排查。回答会优先依据知识库；涉及退款时，系统会核验演示订单并转人工跟进。</p>
+    <div class="welcome-points"><span>知识来源可追溯</span><span>退款由人工确认</span><span>会话相互隔离</span></div>
+  </div>
+  <div class="welcome-art" aria-hidden="true"><span class="art-orbit orbit-one"></span><span class="art-orbit orbit-two"></span><span class="art-center">答</span><span class="art-dot dot-one"></span><span class="art-dot dot-two"></span></div>
+</section>
+<section class="prompt-section" aria-labelledby="prompt-title">
+  <div class="section-heading"><div><p class="eyebrow">从常见问题开始</p><h2 id="prompt-title">试试这些问题</h2></div><span class="hint">点击即可填入输入框</span></div>
+  <div class="prompt-grid">
+    <button type="button" class="prompt-card" data-prompt="扫地机器人无法回充怎么办？"><span class="prompt-icon">⌕</span><span><strong>故障排查</strong><small>扫地机器人无法回充怎么办？</small></span><span class="prompt-arrow">↗</span></button>
+    <button type="button" class="prompt-card" data-prompt="扫地机器人的滤网多久需要更换？"><span class="prompt-icon">◷</span><span><strong>保养建议</strong><small>滤网多久需要更换？</small></span><span class="prompt-arrow">↗</span></button>
+    <button type="button" class="prompt-card" data-prompt="我想申请退款，请帮我核验订单。"><span class="prompt-icon">↗</span><span><strong>退款流程</strong><small>我想申请退款，怎么处理？</small></span><span class="prompt-arrow">↗</span></button>
+  </div>
+</section>
+{% endif %}
+
 {% if my_reports %}
-<section class="my-reports">
-  <h2>我的使用报告</h2>
+<section class="my-reports panel">
+  <div class="section-heading"><div><p class="eyebrow">个人记录</p><h2>我的使用报告</h2></div></div>
   {% for r in my_reports %}
   <details class="report-card" {% if loop.first %}open{% endif %}>
-    <summary>{{ r.month }} 使用报告 · 更新于 {{ r.updated_at }}</summary>
+    <summary>{{ r.month }} 使用报告 <span class="hint">更新于 {{ r.updated_at }}</span></summary>
     <article class="report md">{{ r.content | md }}</article>
   </details>
   {% endfor %}
 </section>
 {% endif %}
+
 {% if demo_orders %}
-<section class="demo-orders">
-  <details {% if not messages %}open{% endif %}>
-    <summary>我的演示订单（{{ demo_notice }}）</summary>
-    <p class="hint">这些是本地生成的合成订单，仅用于演示退款核验流程；系统不会执行任何退款操作。发起退款时说订单号即可。</p>
-    <table class="demo-order-table">
-      <thead>
-        <tr><th>订单号</th><th>商品</th><th>金额</th><th>下单日期</th><th>状态</th></tr>
-      </thead>
-      <tbody>
-        {% for o in demo_orders %}
-        <tr>
-          <td><code>{{ o.order_no }}</code></td>
-          <td>{{ o.product }}</td>
-          <td>{{ '%.2f' | format(o.amount) }} 元</td>
-          <td>{{ o.purchased_at }}</td>
-          <td>{{ o.order_status }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+<section class="demo-orders panel">
+  <details>
+    <summary><span><span class="eyebrow">退款流程演示</span><strong>我的演示订单</strong></span><span class="demo-label">{{ demo_notice }}</span></summary>
+    <p class="hint">订单由本地生成，仅用于演示核验流程；系统不会执行退款。发起退款时，在对话中提供订单号即可。</p>
+    <div class="table-wrap">
+      <table class="demo-order-table">
+        <thead><tr><th>订单号</th><th>商品</th><th>金额</th><th>下单日期</th><th>状态</th></tr></thead>
+        <tbody>{% for o in demo_orders %}
+          <tr><td><code>{{ o.order_no }}</code></td><td>{{ o.product }}</td><td>{{ '%.2f' | format(o.amount) }} 元</td><td>{{ o.purchased_at }}</td><td><span class="table-status">{{ o.order_status }}</span></td></tr>
+        {% endfor %}</tbody>
+      </table>
+    </div>
   </details>
 </section>
 {% endif %}
-<div class="chat" id="chat">
-  {% if not messages %}<p class="hint" id="empty-hint">还没有对话，发送第一条提问试试。</p>{% endif %}
-  {% for m in messages %}{{ ui.render_message(m) }}{% endfor %}
-</div>
+
+<section class="chat-panel panel" aria-label="售后问答对话">
+  <div class="chat-panel-head"><div><p class="eyebrow">当前会话</p><h2>对话记录</h2></div><span class="conversation-state"><span class="status-dot"></span>已保存</span></div>
+  <div class="chat" id="chat" data-last-message-id="{{ last_message_id|default(0) }}" aria-live="polite" aria-relevant="additions text">
+    {% if not messages %}<p class="empty-hint" id="empty-hint">发送问题后，回答和处理状态会显示在这里。</p>{% endif %}
+    {% for m in messages %}{{ ui.render_message(m) }}{% endfor %}
+  </div>
+</section>
 
 <form class="chat-form" id="chat-form" method="post" action="/chat">
-  <input name="question" placeholder="请输入问题，例如：扫地机器人无法回充怎么办？" required autocomplete="off">
-  <button type="submit">发送</button>
+  <label class="sr-only" for="question-input">输入售后问题</label>
+  <textarea id="question-input" name="question" placeholder="输入你的问题，例如：扫地机器人无法回充怎么办？" required autocomplete="off" rows="1"></textarea>
+  <button class="button button-primary send-button" type="submit"><span>发送</span><span aria-hidden="true">↑</span></button>
+  <p class="composer-hint">Enter 发送 · Shift + Enter 换行</p>
 </form>
 {% endblock %}
 
 {% block scripts %}
 <script>
-  // 渐进增强：直接提交走 /chat 整页刷新，支持 JS 时改用 /chat/stream 流式渲染
   (function () {
     var form = document.getElementById('chat-form');
     if (!form || !window.fetch) return;
 
     var chat = document.getElementById('chat');
-    var input = form.querySelector('input[name="question"]');
-    var button = form.querySelector('button');
+    var input = form.querySelector('textarea[name="question"]');
+    var button = form.querySelector('button[type="submit"]');
     var busy = false;
+    var messageCursor = Number(chat.getAttribute('data-last-message-id') || 0);
+    var pendingPoll = null;
 
-    function scrollToEnd() {
-      window.scrollTo(0, document.body.scrollHeight);
+    function scrollToEnd() { window.scrollTo(0, document.body.scrollHeight); }
+    function resizeInput() {
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 144) + 'px';
     }
-
     function makeMessage(role) {
       var wrap = document.createElement('div');
       wrap.className = 'msg ' + role;
-      var tools = document.createElement('div');
-      tools.className = 'tools';
-      tools.style.display = 'none';
       var bubble = document.createElement('div');
       bubble.className = 'bubble' + (role === 'assistant' ? ' md' : '');
       if (role === 'assistant') {
+        var tools = document.createElement('div');
+        tools.className = 'tools';
+        tools.hidden = true;
         wrap.appendChild(tools);
         wrap.appendChild(bubble);
       } else {
         wrap.appendChild(bubble);
       }
       chat.appendChild(wrap);
-      return { wrap: wrap, tools: tools, bubble: bubble };
+      return { wrap: wrap, bubble: bubble, tools: wrap.querySelector('.tools') };
     }
+
+    input.addEventListener('input', resizeInput);
+    input.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    document.querySelectorAll('[data-prompt]').forEach(function (card) {
+      card.addEventListener('click', function () {
+        input.value = card.getAttribute('data-prompt') || '';
+        input.focus();
+        resizeInput();
+      });
+    });
 
     form.addEventListener('submit', function (event) {
       var text = input.value.trim();
-      if (!text) { event.preventDefault(); return; }
-      // 没有流式能力时退回普通提交
-      if (busy) { event.preventDefault(); return; }
+      if (!text || busy) { event.preventDefault(); return; }
       event.preventDefault();
 
       busy = true;
       button.disabled = true;
+      form.classList.add('is-loading');
       var hint = document.getElementById('empty-hint');
       if (hint) hint.remove();
 
       var user = makeMessage('user');
       user.bubble.textContent = text;
-
       var reply = makeMessage('assistant');
-      reply.bubble.textContent = '正在思考…';
+      reply.bubble.textContent = '正在检索知识库并整理答复…';
       scrollToEnd();
       input.value = '';
+      resizeInput();
 
       var toolNames = [];
       var raw = '';
@@ -108,9 +144,10 @@
       function finish() {
         busy = false;
         button.disabled = false;
+        form.classList.remove('is-loading');
+        input.focus();
         scrollToEnd();
       }
-
       function handleEvent(block) {
         var name = 'message';
         var data = '';
@@ -130,30 +167,29 @@
           } else if (payload.ticket) {
             var tag = document.createElement('div');
             tag.className = 'handoff-tag';
-            tag.textContent = '已提交人工工单 #' + payload.ticket.id +
-              '（' + payload.ticket.status + '），请等待坐席接入';
-            user.wrap.appendChild(tag);
-          } else if (payload.need_human) {
-            var tag = document.createElement('div');
-            tag.className = 'handoff-tag';
-            tag.textContent = '已为您申请人工客服，请等待坐席接入';
+            tag.textContent = '已提交人工工单 #' + payload.ticket.id + '（' + payload.ticket.status + '）';
             user.wrap.appendChild(tag);
           }
         } else if (name === 'tool') {
           toolNames.push(payload);
-          reply.tools.style.display = '';
-          reply.tools.textContent = '调用工具：' + toolNames.join('、');
+          if (reply.tools) {
+            reply.tools.hidden = false;
+            reply.tools.textContent = '本轮处理：' + toolNames.join('、');
+          }
         } else if (name === 'token') {
           if (raw === '') reply.bubble.textContent = '';
           raw += payload;
           reply.bubble.textContent = raw;
         } else if (name === 'done') {
           reply.bubble.innerHTML = payload.html;
-          if (!toolNames.length) reply.tools.style.display = 'none';
-          else reply.tools.textContent = '调用工具：' + toolNames.join('、');
           finished = true;
+          if (payload.pending) {
+            messageCursor = Math.max(messageCursor, Number(payload.cursor_id) || 0);
+            startApprovalPolling();
+          }
         } else if (name === 'error') {
           reply.bubble.textContent = payload;
+          reply.bubble.classList.add('stream-error');
           finished = true;
         }
         scrollToEnd();
@@ -161,7 +197,6 @@
 
       var body = new FormData();
       body.append('question', text);
-
       fetch('/chat/stream', { method: 'POST', body: body })
         .then(function (response) {
           if (!response.ok || !response.body) throw new Error('无法建立流式连接');
@@ -184,10 +219,34 @@
           return pump();
         })
         .catch(function () {
-          if (!finished) reply.bubble.textContent = '网络异常，请稍后重试。';
+          if (!finished) {
+            reply.bubble.textContent = '连接暂时中断，请检查网络后重试。';
+            reply.bubble.classList.add('stream-error');
+            input.value = text;
+            resizeInput();
+          }
         })
         .then(finish);
     });
+
+    function startApprovalPolling() {
+      if (pendingPoll) window.clearInterval(pendingPoll);
+      pendingPoll = window.setInterval(function () {
+        fetch('/chat/updates?after_id=' + encodeURIComponent(messageCursor))
+          .then(function (response) { if (!response.ok) throw new Error('updates failed'); return response.json(); })
+          .then(function (data) {
+            (data.messages || []).forEach(function (message) {
+              messageCursor = Math.max(messageCursor, Number(message.id) || 0);
+              if (message.role !== 'assistant') return;
+              var item = makeMessage('assistant');
+              item.bubble.textContent = message.content;
+              scrollToEnd();
+              window.clearInterval(pendingPoll);
+              pendingPoll = null;
+            });
+          }).catch(function () {});
+      }, 3000);
+    }
   })();
 </script>
 {% endblock %}

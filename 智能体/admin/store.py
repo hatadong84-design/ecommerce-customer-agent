@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
 import psycopg
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import dict_row
 
 from 智能体.config_handler import db_conf
@@ -156,6 +156,8 @@ KB_INDEX_STATES = [KB_INDEX_PENDING, KB_INDEX_DONE, KB_INDEX_FAILED]
 
 # 转人工工单的状态流转：待接入 -> 处理中 -> 已解决
 TICKET_STATUSES = ["待接入", "处理中", "已解决"]
+ALL_TICKET_STATUSES = ["待接入", "待审批", "审批已通过", "审批已退回", "处理中", "已解决"]
+TICKET_FINAL_STATUSES = {"审批已通过", "审批已退回", "已解决"}
 
 # 访客在界面上按「用户NNNN」展示，编号由数据库序列分配，从 1001 起
 USER_ID_PREFIX = "用户"
@@ -193,7 +195,17 @@ _inited = False
 
 def dsn() -> str:
     """优先用环境变量 DATABASE_URL 覆盖 db.yml 里的连接串"""
-    return os.getenv("DATABASE_URL") or db_conf["dsn"]
+    explicit = os.getenv("DATABASE_URL")
+    if explicit:
+        return explicit
+    host = os.getenv("DB_HOST")
+    user = os.getenv("POSTGRES_USER")
+    password = os.getenv("POSTGRES_PASSWORD")
+    database = os.getenv("POSTGRES_DB")
+    if host and user and password and database:
+        return make_conninfo(host=host, port=os.getenv("DB_PORT", "5432"),
+                             user=user, password=password, dbname=database)
+    return db_conf["dsn"]
 
 
 def connect() -> psycopg.Connection:
@@ -348,8 +360,8 @@ def sync_handoff_ticket(session_id: str, question: str, sentiment: Mapping[str, 
     with connect() as conn:
         existing = conn.execute(
             "SELECT id, status FROM handoff_ticket "
-            "WHERE session_id = %s AND status <> %s ORDER BY id DESC LIMIT 1",
-            (session_id, TICKET_STATUSES[-1]),
+            "WHERE session_id = %s AND NOT (status = ANY(%s)) ORDER BY id DESC LIMIT 1",
+            (session_id, list(TICKET_FINAL_STATUSES)),
         ).fetchone()
         if existing:
             conn.execute(
@@ -459,6 +471,48 @@ def set_ticket_status(ticket_id: int, status: str, agent_name: str | None = None
         )
 
 
+def decide_refund_approval(ticket_id: int, decision: str, operator: str, note: str = "") -> bool:
+    """Atomically decide a pending synthetic refund approval; duplicate decisions are rejected."""
+    target = {"approve": "审批已通过", "reject": "审批已退回"}.get(decision)
+    if not target:
+        raise ValueError("无效审批决定")
+    with connect() as conn:
+        current = conn.execute(
+            "SELECT status, session_id, agent_name FROM handoff_ticket WHERE id = %s FOR UPDATE",
+            (ticket_id,),
+        ).fetchone()
+        if not current or current["status"] != "待审批":
+            return False
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "UPDATE handoff_ticket SET status = %s, agent_name = COALESCE(agent_name, %s), "
+            "resolution = %s, updated_at = %s WHERE id = %s",
+            (target, operator, note or ("模拟退款资格审批通过" if decision == "approve" else "模拟退款资格审批退回"), now, ticket_id),
+        )
+        _write_ticket_event(conn, ticket_id, current["session_id"], current["status"], target,
+                            operator=operator, agent_name=current["agent_name"] or operator,
+                            note=note or "模拟退款资格审批")
+        return True
+
+
+def messages_after(session_id: str, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    """Return only newer messages belonging to the caller's session."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, role, content FROM chat_log WHERE session_id = %s AND id > %s "
+            "AND role IN ('user','assistant') ORDER BY id LIMIT %s",
+            (session_id, after_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def latest_message_id(session_id: str) -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COALESCE(MAX(id), 0) AS id FROM chat_log WHERE session_id = %s",
+                           (session_id,)).fetchone()
+        return int(row["id"])
+
+
 def ticket_events(ticket_id: int) -> list[dict[str, Any]]:
     """某张工单的全部变更记录，按发生顺序正序"""
     with connect() as conn:
@@ -487,7 +541,7 @@ def ticket_event_map(ticket_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
 
 def ticket_counts() -> dict[str, int]:
     """各状态工单数量，用于管理后台的工单概览"""
-    counts = {state: 0 for state in TICKET_STATUSES}
+    counts = {state: 0 for state in ALL_TICKET_STATUSES}
     with connect() as conn:
         for row in conn.execute(
             "SELECT status, COUNT(*) AS c FROM handoff_ticket GROUP BY status"

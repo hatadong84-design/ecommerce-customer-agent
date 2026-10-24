@@ -31,6 +31,10 @@ class VectorStoreService:
     def get_retriever(self):
         return self.vector_store.as_retriever(search_kwargs={"k": chroma_conf["k"]})
 
+    def count_chunks(self) -> int:
+        """返回当前集合中的向量块数，封装 Chroma 集合的内部访问。"""
+        return self.vector_store._collection.count()
+
     def retrieve_with_scores(self, query: str, k: int | None = None,
                              category: str | None = None) -> list[tuple[Document, float]]:
         """带相关度分数的检索（分数越高越相关）。

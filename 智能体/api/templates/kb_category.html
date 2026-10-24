@@ -1,8 +1,10 @@
 {% extends "base.html" %}
 {% block title %}{{ category }} · 数据管理器{% endblock %}
 {% block content %}
-<p class="hint">商品分类：<strong>{{ category }}</strong> · 共 {{ documents|length }} 篇文档 ·
-  <a href="/admin/kb">返回知识库总览</a></p>
+<section class="page-intro">
+  <div><p class="eyebrow">当前分类 · {{ category }}</p><p>共 {{ documents|length }} 篇文档；保存正文后会重新建立向量索引。</p></div>
+  <a class="button" href="/admin/kb">← 返回知识库</a>
+</section>
 
 <section class="kb-upload">
   <h3>上传新知识文档</h3>

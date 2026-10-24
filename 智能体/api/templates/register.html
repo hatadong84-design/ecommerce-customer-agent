@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="auth-layout">
+  <div class="auth-aside">
+    <span class="auth-mark" aria-hidden="true">管</span>
+    <p class="eyebrow">ADMIN WORKSPACE</p>
+    <h2>集中处理会话、工单<br>和知识文档</h2>
+    <p>注册仅用于本地演示管理员工作区。邀请码由运行环境配置，不在访客页面公开。</p>
+    <a class="auth-back" href="/">← 返回智能问答</a>
+  </div>
+  <div class="auth-card">
+    <p class="eyebrow">创建访问账号</p>
+    <h2>管理员注册</h2>
+    <p class="auth-intro">请填写管理员信息和运行环境提供的邀请码。</p>
+    <form class="auth-form" method="post" action="/register">
+      <label for="register-username">用户名</label>
+      <input id="register-username" name="username" autocomplete="username" placeholder="至少 3 个字符" required>
+      <label for="register-password">密码</label>
+      <input id="register-password" name="password" type="password" autocomplete="new-password" minlength="6" placeholder="至少 6 位" required>
+      <label for="register-invite">管理员邀请码</label>
+      <input id="register-invite" name="invite_code" type="password" autocomplete="off" placeholder="请输入邀请码" required>
+      <button class="button button-primary button-full" type="submit">创建管理员账号 <span aria-hidden="true">→</span></button>
+    </form>
+    <p class="auth-switch">已有账号？ <a href="/login">返回登录</a></p>
+  </div>
+</section>
+{% endblock %}

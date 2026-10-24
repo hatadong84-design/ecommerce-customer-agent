@@ -13,7 +13,7 @@ QUESTIONS = [
 if __name__ == "__main__":
     vs = VectorStoreService()
 
-    total = vs.vector_store._collection.count()
+    total = vs.count_chunks()
     print(f"向量库中当前共有 {total} 个文档片段")
     if total == 0:
         print("库是空的：请先运行 python -m 智能体.rag.vector_store 完成加载")

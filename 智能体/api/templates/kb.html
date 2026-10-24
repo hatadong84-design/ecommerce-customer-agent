@@ -1,15 +1,17 @@
 {% extends "base.html" %}
 {% block title %}知识库管理{% endblock %}
 {% block content %}
-<p class="hint">按商品分类维护知识库。每个分类是一份独立的「数据管理器」，可上传 txt / pdf / docx
-文档，并支持修改与删除；改动会同步到向量库，AI 回答即刻使用最新内容。</p>
+<section class="page-intro">
+  <div><p class="eyebrow">知识维护</p><p>按商品分类管理问答资料；索引状态可见，失败文档可单独重试。</p></div>
+  <span class="workspace-pill">支持 TXT · PDF · DOCX</span>
+</section>
 
 <div class="stats">
   <div class="card"><div class="num">{{ categories|length }}</div><div class="label">商品分类</div></div>
   <div class="card"><div class="num">{{ total }}</div><div class="label">知识文档</div></div>
 </div>
 
-<form class="filters" method="post" action="/admin/kb/cat/create">
+<form class="filters kb-category-form" method="post" action="/admin/kb/cat/create">
   <label>新建商品分类 <input name="name" placeholder="如：洗地机 / 配件耗材" required></label>
   <button type="submit">创建分类</button>
 </form>
@@ -22,6 +24,7 @@
 {% if not categories %}
   <p class="hint">还没有商品分类，先在上面创建一个。</p>
 {% else %}
+<div class="table-wrap">
 <table class="kb-table">
   <thead>
     <tr><th>商品分类</th><th>文档数</th><th>创建时间</th><th>操作</th></tr>
@@ -44,5 +47,6 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 {% endblock %}

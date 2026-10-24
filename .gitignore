@@ -16,6 +16,8 @@
 !/requirements.txt
 !/pytest.ini
 !/docker-compose.yml
+!/Dockerfile
+!/.dockerignore
 !/.env.example
 !/.gitignore
 
@@ -50,6 +52,11 @@ md5.text
 # 企业工作流平台的评估产物，属于另一个独立项目，不纳入本仓库
 智能体/eval/workflow_platform_cases.json
 智能体/eval/results/workflow_platform_eval.csv
+
+# 包内与根目录重复的说明与依赖清单，仓库统一以根目录版本为准
+智能体/README.md
+智能体/requirements.txt
+智能体/.env.example
 
 # 工具与编辑器
 .idea/

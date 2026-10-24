@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from urllib.parse import quote, urlencode
@@ -11,6 +12,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from langchain_core.messages import ToolMessage
+from langgraph.checkpoint.postgres import PostgresSaver
 from markdown_it import MarkdownIt
 from markupsafe import Markup
 from starlette.concurrency import run_in_threadpool
@@ -30,14 +32,16 @@ from 智能体.agent.tools.agent_tools import (
 )
 from 智能体.agent.category_service import CATEGORIES, CategoryService
 from 智能体.agent.report_service import ReportService
+from 智能体.agent.refund_approval import (
+    approval_thread_id, build_refund_approval_graph, resume_command,
+)
 from 智能体.agent.sentiment_service import SentimentService
-from 智能体.config_handler import admin_conf, agent_conf
+from 智能体.config_handler import agent_conf
 from 智能体.logger_hander import logger
 from 智能体.path_toll import get_abs_path
 from 智能体.rag import kb_service
 from 智能体.rag.rag_service import NO_KNOWLEDGE_ANSWER
 
-ROLES = ["普通用户", "管理员"]
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 if not SESSION_SECRET:
     raise RuntimeError("缺少 SESSION_SECRET 环境变量，请在项目根目录的 .env 中配置后再启动")
@@ -46,6 +50,9 @@ if not SESSION_SECRET:
 HISTORY_LIMIT = 20
 
 templates = Jinja2Templates(directory=get_abs_path("智能体/api/templates"))
+_approval_saver = None
+_approval_saver_context = None
+_approval_graph = None
 
 # html=False 会转义原文里的 HTML 标签，避免把用户输入当标签执行
 _markdown = MarkdownIt("commonmark", {"html": False, "linkify": False})
@@ -53,7 +60,14 @@ _markdown = MarkdownIt("commonmark", {"html": False, "linkify": False})
 
 def render_markdown(text) -> Markup:
     """把 Markdown 原文渲染成 HTML，返回 Markup 以免被模板二次转义"""
-    return Markup(_markdown.render(str(text or "")))
+    rendered = _markdown.render(str(text or ""))
+    rendered = re.sub(
+        r"<p>参考来源：(.*?)</p>",
+        r'<p class="source-list"><strong>参考来源</strong><span>\1</span></p>',
+        rendered,
+        flags=re.DOTALL,
+    )
+    return Markup(rendered)
 
 
 templates.env.filters["md"] = render_markdown
@@ -61,10 +75,20 @@ templates.env.filters["md"] = render_markdown
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _approval_saver, _approval_saver_context, _approval_graph
     store.init_db()
-    # 首次启动：建默认商品分类，并把已有的 txt 知识导入后台管理器
-    kb_service.ensure_kb_seeded()
-    yield
+    _approval_saver_context = PostgresSaver.from_conn_string(store.dsn())
+    try:
+        _approval_saver = _approval_saver_context.__enter__()
+        _approval_saver.setup()
+        _approval_graph = build_refund_approval_graph(_approval_saver)
+        # 首次启动：建默认商品分类，并把已有的 txt 知识导入后台管理器
+        kb_service.ensure_kb_ready()
+        yield
+    finally:
+        if _approval_saver_context is not None and _approval_saver is not None:
+            _approval_saver_context.__exit__(None, None, None)
+        _approval_saver = _approval_saver_context = _approval_graph = None
 
 
 app = FastAPI(lifespan=lifespan)
@@ -96,10 +120,6 @@ def is_admin(request: Request) -> bool:
     return bool(request.session.get("admin_user"))
 
 
-def current_role(request: Request) -> str:
-    return request.session.get("role") or ROLES[0]
-
-
 def session_id_of(request: Request) -> str:
     session = request.session
     user_id = session.get("session_id")
@@ -112,13 +132,9 @@ def session_id_of(request: Request) -> str:
 def base_context(request: Request) -> dict:
     return {
         "is_admin": is_admin(request),
-        "role": current_role(request),
         "admin_user": request.session.get("admin_user"),
         "session_id": session_id_of(request),
         "flash": request.query_params.get("flash") or "",
-        "roles": ROLES,
-        # 演示用：把邀请码显示在注册表单旁，方便访客自行注册管理员体验功能
-        "invite_code": admin_conf["invite_code"],
     }
 
 
@@ -280,6 +296,21 @@ def handle_turn(session_id: str, question: str, payload: dict) -> tuple[str, lis
         ticket, order, stage = prepare_support(session_id, question, payload)
     except Exception as e:
         logger.error(f"[handle_turn]创建转人工工单失败，{str(e)}")
+    if stage == "verified" and ticket and order:
+        _approval_graph.invoke(
+            {"ticket_id": ticket["id"], "order_no": order["order_no"],
+             "eligible": order["refund_eligible"], "eligibility_note": order["eligibility_note"]},
+            {"configurable": {"thread_id": approval_thread_id(ticket["id"])}},
+        )
+        answer = (
+            f"已核验演示订单 {order['order_no']}（{order_service.DEMO_DATA_NOTICE}）："
+            f"程序结果为“{order['refund_eligible']}”。资格结果需管理员审批，工单 #{ticket['id']} 当前待审批。"
+            "本流程只演示资格核验，不会执行真实退款。"
+        )
+        record(session_id, "assistant", answer)
+        store.set_ticket_status(ticket["id"], "待审批", resolution="等待管理员审批模拟退款资格", operator="system")
+        ticket = {**ticket, "status": "待审批"}
+        return answer, []
     # 把本轮工单与退款核验结果交给提示词，模型才会用真实工单号与真实资格；
     # 两者都没有时一并清空，避免串到下一轮。
     set_current_ticket(ticket)
@@ -394,6 +425,7 @@ def index(request: Request):
     rows.reverse()  # 查询是倒序，展示改为正序
     context = base_context(request)
     context["messages"] = build_messages(rows, context["is_admin"])
+    context["last_message_id"] = max((row["id"] for row in rows), default=0)
     # 管理员为「本用户」生成过的报告，直接展示在他自己的问答页里
     context["my_reports"] = store.list_usage_reports(context["session_id"])
     # 演示订单：合成数据，按当前会话初始化，供用户手工体验退款核验流程
@@ -435,6 +467,32 @@ async def stream_turn(session_id: str, question: str, admin: bool):
         except Exception as e:
             logger.error(f"[stream_turn]创建转人工工单失败，{str(e)}")
             stage = ""
+        if stage == "verified" and ticket and order:
+            # Persist the checkpoint first; expose the approval action only after it is resumable.
+            await run_in_threadpool(
+                _approval_graph.invoke,
+                {"ticket_id": ticket["id"], "order_no": order["order_no"],
+                 "eligible": order["refund_eligible"],
+                 "eligibility_note": order["eligibility_note"]},
+                {"configurable": {"thread_id": approval_thread_id(ticket["id"])}},
+            )
+            answer = (
+                f"已核验演示订单 {order['order_no']}（{order_service.DEMO_DATA_NOTICE}）："
+                f"程序结果为“{order['refund_eligible']}”。资格结果需管理员审批，工单 #{ticket['id']} 当前待审批。"
+                "本流程只演示资格核验，不会执行真实退款。"
+            )
+            await run_in_threadpool(record, session_id, "assistant", answer, None, [])
+            await run_in_threadpool(
+                store.set_ticket_status, ticket["id"], "待审批", None,
+                "等待管理员审批模拟退款资格", None, "system",
+            )
+            ticket = {**ticket, "status": "待审批"}
+            yield sse("sentiment", {"need_human": True, "ticket": ticket, "analysis_html": ""})
+            yield sse("pending", {"ticket_id": ticket["id"]})
+            cursor_id = await run_in_threadpool(store.latest_message_id, session_id)
+            yield sse("done", {"html": str(render_markdown(answer)), "tools_used": [],
+                               "pending": True, "cursor_id": cursor_id})
+            return
         # 把本轮工单与退款核验结果交给提示词；两者都没有时一并清空，避免串到下一轮
         set_current_ticket(ticket)
         set_current_order(order, stage)
@@ -506,11 +564,17 @@ async def chat_stream(request: Request, question: str = Form(...)):
     )
 
 
+@app.get("/chat/updates")
+def chat_updates(request: Request, after_id: int = 0):
+    session_id = session_id_of(request)
+    return {"messages": store.messages_after(session_id, max(after_id, 0))}
+
+
 @app.get("/report")
 def report_page(request: Request):
     # 使用报告含用户设备数据，只对管理员开放
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     users, months = load_records_index()
     context = base_context(request)
     context.update({"users": users, "months": months, "report": None,
@@ -522,7 +586,7 @@ def report_page(request: Request):
 @app.post("/report")
 def report_generate(request: Request, user_id: str = Form(...), month: str = Form(...)):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     users, months = load_records_index()
     report = get_report_service().generate_report(user_id, month)
     # 生成即落库，用户在自己问答页就能看到；同一用户同一月份重复生成会覆盖
@@ -535,19 +599,26 @@ def report_generate(request: Request, user_id: str = Form(...), month: str = For
     return templates.TemplateResponse(request, "report.html", context)
 
 
-@app.post("/role")
-def switch_role(request: Request, role: str = Form(...)):
-    request.session["role"] = role if role in ROLES else ROLES[0]
-    return RedirectResponse("/", status_code=303)
+@app.get("/login")
+def login_page(request: Request):
+    if is_admin(request):
+        return RedirectResponse("/admin", status_code=303)
+    return templates.TemplateResponse(request, "login.html", base_context(request))
+
+
+@app.get("/register")
+def register_page(request: Request):
+    if is_admin(request):
+        return RedirectResponse("/admin", status_code=303)
+    return templates.TemplateResponse(request, "register.html", base_context(request))
 
 
 @app.post("/login")
 def login(request: Request, username: str = Form(...), password: str = Form(...)):
     if auth.authenticate(username, password):
         request.session["admin_user"] = username.strip()
-        request.session["role"] = ROLES[1]
-        return RedirectResponse("/", status_code=303)
-    return RedirectResponse(f"/?flash={quote('用户名或密码错误')}", status_code=303)
+        return RedirectResponse("/admin", status_code=303)
+    return RedirectResponse(f"/login?flash={quote('用户名或密码错误')}", status_code=303)
 
 
 @app.post("/register")
@@ -556,16 +627,15 @@ def register(request: Request, username: str = Form(...), password: str = Form(.
     ok, message = auth.register(username, password, invite_code)
     if ok:
         request.session["admin_user"] = username.strip()
-        request.session["role"] = ROLES[1]
-        return RedirectResponse("/", status_code=303)
-    return RedirectResponse(f"/?flash={quote(message)}", status_code=303)
+        return RedirectResponse("/admin", status_code=303)
+    return RedirectResponse(f"/register?flash={quote(message)}", status_code=303)
 
 
 @app.post("/logout")
 def logout(request: Request):
     request.session.pop("admin_user", None)
-    request.session["role"] = ROLES[0]
-    return RedirectResponse("/", status_code=303)
+    request.session.pop("role", None)
+    return RedirectResponse("/login?flash=%E5%B7%B2%E9%80%80%E5%87%BA%E7%99%BB%E5%BD%95", status_code=303)
 
 
 @app.get("/admin")
@@ -573,7 +643,7 @@ def admin_page(request: Request, session_id: str = "",
                q: str = "", urgency: str = "全部", human: int = 0,
                category: str = "全部"):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
 
     sessions = store.list_sessions()
     rows = store.query_turns(**filter_kwargs(session_id, q, urgency, human, category))
@@ -603,7 +673,7 @@ def admin_page(request: Request, session_id: str = "",
 def admin_export(request: Request, session_id: str = "", q: str = "",
                  urgency: str = "全部", human: int = 0, category: str = "全部"):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     rows = store.query_turns(**filter_kwargs(session_id, q, urgency, human, category))
     return Response(
         content=store.to_csv(rows),
@@ -615,7 +685,7 @@ def admin_export(request: Request, session_id: str = "", q: str = "",
 @app.post("/admin/cleanup")
 def admin_cleanup(request: Request, target: str = Form("")):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     deleted = store.delete_turns(target or None)
     return RedirectResponse(f"/admin?flash={quote(f'已删除 {deleted} 条记录')}", status_code=303)
 
@@ -623,7 +693,7 @@ def admin_cleanup(request: Request, target: str = Form("")):
 @app.get("/admin/tickets")
 def admin_tickets(request: Request, status: str = "全部", session_id: str = ""):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     current = None if status in ("", "全部") else status
     context = base_context(request)
     tickets = store.query_tickets(current, session_id or None)
@@ -633,7 +703,8 @@ def admin_tickets(request: Request, status: str = "全部", session_id: str = ""
         "counts": store.ticket_counts(),
         "selected_status": status,
         "selected_session": session_id,
-        "statuses": store.TICKET_STATUSES,
+        "statuses": store.ALL_TICKET_STATUSES,
+        "editable_statuses": store.TICKET_STATUSES,
     })
     return templates.TemplateResponse(request, "tickets.html", context)
 
@@ -644,8 +715,9 @@ def admin_ticket_update(request: Request, ticket_id: int = Form(...), status: st
                         close_reason: str = Form(""), back: str = Form("")):
     """推进工单状态，同时可记录责任人、处理记录与关闭原因"""
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
-    if status in store.TICKET_STATUSES:
+        return RedirectResponse("/login", status_code=303)
+    current = store.get_ticket(ticket_id)
+    if status in store.TICKET_STATUSES and current and current["status"] != "待审批":
         store.set_ticket_status(
             ticket_id, status,
             (agent_name or "").strip() or None,
@@ -662,7 +734,7 @@ def admin_ticket_update(request: Request, ticket_id: int = Form(...), status: st
 def admin_ticket_detail(request: Request, ticket_id: int):
     """工单详情：该用户在同一会话里的完整对话记录 + 工单操作"""
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     ticket = store.get_ticket(ticket_id)
     if not ticket:
         return RedirectResponse(
@@ -688,6 +760,45 @@ def admin_ticket_detail(request: Request, ticket_id: int):
     return templates.TemplateResponse(request, "ticket_detail.html", context)
 
 
+@app.post("/admin/tickets/{ticket_id}/approval")
+def admin_refund_approval(request: Request, ticket_id: int,
+                          decision: str = Form(...), note: str = Form("")):
+    if not is_admin(request):
+        return RedirectResponse("/login", status_code=303)
+    if decision not in {"approve", "reject"}:
+        return RedirectResponse(
+            f"/admin/tickets/{ticket_id}?flash={quote('无效审批决定')}", status_code=303
+        )
+    operator = request.session.get("admin_user") or "管理员"
+    note = (note or "").strip()
+    changed = store.decide_refund_approval(ticket_id, decision, operator, note)
+    if not changed:
+        return RedirectResponse(
+            f"/admin/tickets/{ticket_id}?flash={quote('该工单不在待审批状态，重复提交未生效')}", status_code=303
+        )
+    ticket = store.get_ticket(ticket_id)
+    if not ticket:
+        return RedirectResponse("/admin/tickets", status_code=303)
+    thread_id = approval_thread_id(ticket_id)
+    try:
+        result = _approval_graph.invoke(
+            resume_command(decision, operator, note),
+            {"configurable": {"thread_id": thread_id}},
+        )
+    except Exception as e:
+        logger.error(f"[admin_refund_approval]恢复审批图失败，ticket_id={ticket_id}，{e}")
+        store.set_ticket_status(ticket_id, "待审批", resolution="审批恢复失败，可重试", operator="system")
+        return RedirectResponse(
+            f"/admin/tickets/{ticket_id}?flash={quote('审批恢复失败，请稍后重试')}", status_code=303
+        )
+    answer = result.get("answer") or "模拟退款资格审批已完成；未执行真实退款。"
+    if ticket.get("session_id"):
+        store.log_turn(ticket["session_id"], "assistant", answer)
+    return RedirectResponse(
+        f"/admin/tickets/{ticket_id}?flash={quote('审批已提交，答复已发送至原会话')}", status_code=303
+    )
+
+
 # ============================================================
 # 知识库管理：按商品分类维护知识文档（上传 txt / pdf / word，并支持改删）
 # ------------------------------------------------------------
@@ -703,7 +814,7 @@ def kb_redirect(category: str, message: str) -> RedirectResponse:
 @app.get("/admin/kb")
 def kb_index(request: Request):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     context = base_context(request)
     context.update({
         "categories": store.list_kb_categories(),
@@ -715,7 +826,7 @@ def kb_index(request: Request):
 @app.get("/admin/kb/{category}")
 def kb_category_page(request: Request, category: str):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     context = base_context(request)
     context.update({
         "category": category,
@@ -727,7 +838,7 @@ def kb_category_page(request: Request, category: str):
 @app.post("/admin/kb/cat/create")
 def kb_category_create(request: Request, name: str = Form(...)):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     name = (name or "").strip()
     if not name:
         return RedirectResponse(f"/admin/kb?flash={quote('分类名称不能为空')}", status_code=303)
@@ -740,7 +851,7 @@ def kb_category_create(request: Request, name: str = Form(...)):
 @app.post("/admin/kb/cat/delete")
 def kb_category_delete(request: Request, name: str = Form(...)):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     removed = get_kb_service().delete_category(name)
     return RedirectResponse(
         f"/admin/kb?flash={quote(f'已删除分类「{name}」及其 {removed} 篇文档')}", status_code=303
@@ -751,7 +862,7 @@ def kb_category_delete(request: Request, name: str = Form(...)):
 async def kb_document_upload(request: Request, category: str = Form(...),
                              title: str = Form(""), file: UploadFile = File(...)):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
 
     data = await file.read()
     filename = file.filename or ""
@@ -769,7 +880,7 @@ async def kb_document_upload(request: Request, category: str = Form(...),
 async def kb_document_update(request: Request, doc_id: int = Form(...),
                              title: str = Form(...), content: str = Form(...)):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     row = await run_in_threadpool(
         get_kb_service().update_document, doc_id, title.strip(), content
     )
@@ -781,7 +892,7 @@ async def kb_document_update(request: Request, doc_id: int = Form(...),
 @app.post("/admin/kb/doc/delete")
 async def kb_document_delete(request: Request, doc_id: int = Form(...)):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     row = await run_in_threadpool(get_kb_service().delete_document, doc_id)
     if not row:
         return RedirectResponse(f"/admin/kb?flash={quote('文档不存在')}", status_code=303)
@@ -792,7 +903,7 @@ async def kb_document_delete(request: Request, doc_id: int = Form(...)):
 async def kb_document_reindex(request: Request, doc_id: int = Form(...)):
     """对单篇文档重试建索引（索引失败后修好数据源，再点重试即可）"""
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     row = await run_in_threadpool(get_kb_service().reindex_document, doc_id)
     if not row:
         return RedirectResponse(f"/admin/kb?flash={quote('文档不存在')}", status_code=303)
@@ -807,7 +918,7 @@ async def kb_document_reindex(request: Request, doc_id: int = Form(...)):
 @app.post("/admin/kb/rebuild")
 async def kb_rebuild(request: Request):
     if not is_admin(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/login", status_code=303)
     count = await run_in_threadpool(get_kb_service().rebuild_index)
     return RedirectResponse(f"/admin/kb?flash={quote(f'向量库已按 {count} 篇文档重建')}", status_code=303)
 

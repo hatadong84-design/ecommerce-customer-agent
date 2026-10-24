@@ -27,6 +27,9 @@ MAX_UPLOAD_MB = 10
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 MAX_PDF_PAGES = 200
 
+# PostgreSQL session advisory lock shared by all app workers during KB startup.
+KB_STARTUP_LOCK_ID = 6_381_492_751_023
+
 
 def _decode_text(data: bytes) -> str:
     """txt 先按 utf-8 解，失败再按 gbk（Windows 记事本常存成 gbk）"""
@@ -98,12 +101,16 @@ class KnowledgeBaseService:
     def _index(self, doc_id: int, category: str, title: str, content: str) -> bool:
         """把一篇文档写入向量库，并把结果记进 kb_document.index_status（失败可重试）"""
         try:
-            self.vector_store.index_document(doc_id, category, title, content)
+            chunk_count = self.vector_store.index_document(doc_id, category, title, content)
+            if chunk_count <= 0:
+                raise ValueError("文档切分后没有可索引的文本块")
             store.set_document_index_status(doc_id, store.KB_INDEX_DONE, None)
             return True
         except Exception as e:
             store.set_document_index_status(doc_id, store.KB_INDEX_FAILED, str(e))
-            logger.error(f"[知识库]文档 {title}（id={doc_id}）建立索引失败：{str(e)}")
+            logger.error(
+                f"[知识库]文档索引失败：id={doc_id}，异常类型={type(e).__name__}"
+            )
             return False
 
     def add_document(self, category: str, title: str, content: str, source_type: str) -> int:
@@ -179,6 +186,73 @@ def ensure_kb_seeded() -> None:
             DEFAULT_CATEGORY, os.path.splitext(name)[0], source_type, text
         )
         logger.info(f"[知识库]导入已有知识文件 {name}（id={doc_id}）")
+
+
+def ensure_kb_ready() -> None:
+    """串行执行默认知识导入，并在数据库有文档但 Chroma 为空时重建索引。"""
+    with store.connect() as lock_conn:
+        lock_conn.execute(
+            "SELECT pg_advisory_lock(%s)", (KB_STARTUP_LOCK_ID,)
+        ).fetchone()
+        try:
+            ensure_kb_seeded()
+            document_count = store.kb_document_total()
+            if document_count == 0:
+                logger.info("[知识库启动]没有知识文档，跳过向量索引检查")
+                return
+
+            try:
+                service = KnowledgeBaseService()
+                chunk_count = service.vector_store.count_chunks()
+            except Exception as exc:
+                logger.error(
+                    f"[知识库启动]向量库状态检查失败，文档 {document_count} 篇；"
+                    f"启动继续，检索将按不可用状态处理。异常类型：{type(exc).__name__}"
+                )
+                return
+            if chunk_count > 0:
+                logger.info(
+                    f"[知识库启动]已有索引，文档 {document_count} 篇，向量块 {chunk_count} 个；跳过重建"
+                )
+                return
+
+            logger.warning(
+                f"[知识库启动]发现文档 {document_count} 篇但向量块为 0，开始重建索引"
+            )
+            try:
+                indexed_count = service.rebuild_index()
+            except Exception as exc:
+                indexed_count = 0
+                error = f"启动索引重建失败（{type(exc).__name__}）"
+                for row in store.list_kb_documents():
+                    store.set_document_index_status(
+                        row["id"], store.KB_INDEX_FAILED, error
+                    )
+                logger.error(
+                    f"[知识库启动]重建索引异常，文档 {document_count} 篇；"
+                    f"异常类型：{type(exc).__name__}"
+                )
+
+            try:
+                final_chunk_count = service.vector_store.count_chunks()
+            except Exception as exc:
+                final_chunk_count = None
+                logger.error(
+                    f"[知识库启动]无法读取重建后的向量块数；"
+                    f"异常类型：{type(exc).__name__}"
+                )
+            failed_count = sum(
+                row["index_status"] != store.KB_INDEX_DONE
+                for row in store.list_kb_documents()
+            )
+            logger.info(
+                f"[知识库启动]恢复结束：成功 {indexed_count} 篇，失败 {failed_count} 篇，"
+                f"向量块 {final_chunk_count if final_chunk_count is not None else '不可用'} 个"
+            )
+        finally:
+            lock_conn.execute(
+                "SELECT pg_advisory_unlock(%s)", (KB_STARTUP_LOCK_ID,)
+            ).fetchone()
 
 
 if __name__ == "__main__":

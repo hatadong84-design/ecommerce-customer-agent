@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
 {% import "_message.html" as ui %}
+<section class="page-intro">
+  <div><p class="eyebrow">运营总览</p><p>查看会话、人工介入和紧急诉求的当前分布。</p></div>
+  <a class="button" href="/admin/tickets">查看工单队列 →</a>
+</section>
 <div class="stats">
   <div class="card"><div class="num">{{ stats.total }}</div><div class="label">用户输入条数</div></div>
   <div class="card"><div class="num">{{ stats.sessions }}</div><div class="label">用户数</div></div>
@@ -8,20 +12,20 @@
   <div class="card"><div class="num">{{ stats.urgent }}</div><div class="label">高紧急</div></div>
 </div>
 {% if stats.emotions %}
-<p class="hint">情绪倾向分布：{% for k, v in stats.emotions.items() %}{{ k }} {{ v }}{% if not loop.last %}、{% endif %}{% endfor %}</p>
+<section class="distribution panel"><strong>情绪倾向</strong><div>{% for k, v in stats.emotions.items() %}<span class="distribution-chip">{{ k }} <b>{{ v }}</b></span>{% endfor %}</div></section>
 {% endif %}
 {% if stats.categories %}
-<p class="hint">业务类型分布：{% for k, v in stats.categories.items() %}{{ k }} {{ v }}{% if not loop.last %}、{% endif %}{% endfor %}</p>
+<section class="distribution panel"><strong>业务类型</strong><div>{% for k, v in stats.categories.items() %}<span class="distribution-chip">{{ k }} <b>{{ v }}</b></span>{% endfor %}</div></section>
 {% endif %}
 
-<p class="ticket-summary">人工工单：
+<section class="ticket-summary"><strong>人工工单</strong>
   {% for state, count in ticket_counts.items() %}
   <a class="ticket-pill" href="/admin/tickets?status={{ state }}">{{ state }} {{ count }}</a>
   {% endfor %}
   <a class="ticket-pill" href="/admin/tickets">全部</a>
-</p>
+</section>
 
-<hr>
+<div class="conversation-section-title"><div><p class="eyebrow">服务记录</p><h2>最近会话</h2></div><span class="hint">按筛选条件查看对话与转接情况</span></div>
 
 {% if not sessions %}
   <p class="hint">暂无对话记录。普通用户在「智能问答」里发送消息后，这里就会出现记录。</p>

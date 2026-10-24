@@ -22,7 +22,7 @@
 | 售前咨询 | 基于知识库回答商品参数、型号、适用场景，并按商品分类隔离资料，避免不同商品串味 |
 | 售后排查 | 故障排查、保养、耗材类问题走对应产品资料 |
 | 可信回答 | 程序先按商品分类预检索，再由审核模型判断「资料是否足以回答」；不足时由程序侧直接拒答，不把常识包装成知识库结论，回答末尾带「参考来源：」 |
-| 退款 / 退换货 | 缺订单号先询问 → 用**演示订单适配器**按当前会话核验 → 自动建/更新人工工单 → 明确告知「已提交 + 当前状态 + 核验结论」，模型**不承诺退款结果** |
+| 退款 / 退换货 | 缺订单号先询问 → 按会话核验合成订单 → LangGraph `interrupt` 暂停在管理员资格审批 → 批准/退回后恢复同一图并答复；不执行真实退款 |
 | 订单隔离 | 演示订单为合成数据、按会话绑定；跨会话订单号一律返回「无法核验」，不泄露订单是否存在 |
 | 身份与真实数据 | 会话绑定固定用户编号（用户1001…）；城市来自用户资料（没有就问用户）；天气调用真实接口 |
 | 使用记录 | 校验当前请求的用户 ID 与月份，只查本人数据 |
@@ -35,7 +35,7 @@
 | 不执行真实退款 | 只到「订单核验 + 建单 + 人工处理」，不产生任何资金动作 |
 | 不接真实电商平台 | 订单来自本地 **演示适配器**（合成数据），不查询真实订单、物流或支付系统 |
 | 没有排队与坐席在线状态 | 转人工只是建单，不做实时分配 |
-| 应用未容器化 | 数据库走 Docker，应用仍需在本机 venv 中手动启动，未提供应用 Dockerfile |
+| 容器运行 | 根目录提供 FastAPI + PostgreSQL Compose 配置和 Chroma 持久卷；已构建启动并验证应用首页 HTTP 200，PostgreSQL healthy |
 | 未接正式评测平台与监控面板 | 评测用脚本 + 表格，监控以日志为主（见第六节） |
 
 ---
@@ -50,9 +50,9 @@ FastAPI 应用 ── 智能体/api/app.py
    ├─ Jinja2 模板渲染各页面
    ├─ 会话中间件：一个浏览器会话 = 一个「用户NNNN」编号
    ├─ 情绪分析 + 业务分类（一次模型调用同时得到两者）
-   ├─ 退款分支：缺单号先询问 → 演示订单适配器核验 → 建单
+   ├─ 退款分支：缺单号先询问 → 演示订单核验 → 建单 → interrupt 等待管理员审批
    ├─ 可信回答入口：预检索 → 可用性判断 → 不可用时短路拒答
-   └─ 转人工判定 ──► handoff_ticket 工单表 + handoff_ticket_event 变更事件
+   └─ 审批恢复 ──► PostgresSaver 按稳定 thread_id 恢复 → 答复写回原会话
          │
          ▼
    LangGraph Agent ── 智能体/agent/agent.py
@@ -73,7 +73,7 @@ FastAPI 应用 ── 智能体/api/app.py
          │
          └──► PostgreSQL（Docker）── 智能体/admin/store.py
                 admin_user / chat_log / handoff_ticket / handoff_ticket_event /
-                kb_category / kb_document / usage_report / user_profile / demo_order
+                kb_category / kb_document / usage_report / user_profile / demo_order + LangGraph checkpoints
 ```
 
 ### 各组件分别负责什么
@@ -83,10 +83,10 @@ FastAPI 应用 ── 智能体/api/app.py
 | **FastAPI** | 提供 HTTP 接口与 SSE 流式输出；渲染页面；管理会话、权限与转人工判定 |
 | **LangGraph + LangChain** | 把「模型 + 工具」编排成可循环的 Agent；维护多轮上下文；驱动工具调用 |
 | **Chroma** | 本地向量库，存知识库分片；支持按商品分类过滤与相关度打分，是检索可信度的基础 |
-| **PostgreSQL（Docker）** | 唯一的事实来源：对话记录、工单、知识库元数据、用户资料、使用报告、演示订单都落库 |
+| **PostgreSQL（Docker）** | 持久化业务记录和 LangGraph 检查点；审批进程重启后可按工单 thread_id 恢复 |
 | **演示订单适配器** | `智能体/agent/order_service.py`：合成订单、按会话隔离；退款资格由程序依据演示数据返回，模型只能转述 |
 | **可信回答守卫** | `智能体/agent/answer_guard.py`：程序侧推断商品分类 → 预检索 → 审核资料是否足以回答 → 不足时直接拒答；Web 与评测共用同一份逻辑 |
-| **SiliconFlow（硅基流动）** | 对话模型 `deepseek-ai/DeepSeek-V3.2` + 嵌入模型 `BAAI/bge-large-zh-v1.5` |
+| **SiliconFlow（硅基流动）** | 对话模型 `deepseek-ai/DeepSeek-V4.1-Flash` + 嵌入模型 `BAAI/bge-large-zh-v1.5` |
 | **Open-Meteo** | 真实天气数据；接口不可用时明确提示，不用假数据顶替 |
 
 ### 目录结构
@@ -124,30 +124,25 @@ py -3.13 -m venv .venv
 
 > 当前实测可用版本：fastapi 0.143.0 / langchain 1.4.4 / langgraph 1.2.14 / langchain-chroma 1.1.0 / psycopg 3.3.6 / chromadb 1.5.9。
 
-### 3. 启动 PostgreSQL（Docker）
+### 3. 使用 Docker 启动应用与 PostgreSQL（可选）
 
-数据库通过仓库根目录的 `docker-compose.yml` 启动，容器名 `agent-postgres`。
-`POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` 必须先在 `.env` 中设置（缺任意一项 compose 会直接报错，仓库里不再保留默认口令）：
-
-```powershell
-docker compose up -d          # 启动 PostgreSQL 16
-docker ps                     # 确认 agent-postgres 处于 healthy
-```
-
-数据保存在命名卷 `agent_pgdata`，容器重建不会丢数据；如需彻底重置，执行 `docker compose down -v`（**会删除全部数据**）。
-
-### 4. 配置环境变量
-
-复制模板并填入你自己的值（**不要把 `.env` 提交到仓库**）：
+先复制环境变量模板并填入本地密钥与数据库密码：
 
 ```powershell
 Copy-Item .env.example .env
 notepad .env
 ```
 
-必填项见下一节。
+再通过仓库根目录的 `docker-compose.yml` 启动 FastAPI 与 PostgreSQL：
 
-### 5. 启动应用
+```powershell
+docker compose up --build -d  # 启动 FastAPI 与 PostgreSQL 16
+docker compose ps             # 检查容器状态
+```
+
+Compose 会将现有 `POSTGRES_*` 配置安全传给应用容器，并由驱动连接 `postgres` 服务；`DATABASE_URL_DOCKER` 可选，用于覆盖默认连接。PostgreSQL 与 Chroma 分别保存在 `agent_pgdata`、`agent_chroma` 命名卷。
+
+### 4. 本机启动应用（不用 Docker 应用服务时）
 
 ```powershell
 # 必须在项目根目录执行（应用是隐式命名空间包，没有 __init__.py）
@@ -156,7 +151,7 @@ notepad .env
 
 首次启动会自动建表（幂等）、初始化商品分类并导入 `智能体/data` 下的知识文档。
 
-### 6. 访问
+### 5. 访问
 
 服务启动后在本机浏览器访问。（以下地址**只在你自己的电脑上有效**，他人需自行克隆并按上文步骤运行）
 
@@ -180,6 +175,7 @@ notepad .env
 | `POSTGRES_PASSWORD` | 是 | docker compose 中 PostgreSQL 的口令（须与 `DATABASE_URL` 一致） |
 | `POSTGRES_DB` | 是 | docker compose 中创建的库名（须与 `DATABASE_URL` 一致） |
 | `DATABASE_URL` | 是 | PostgreSQL 连接串，如 `postgresql://user:pass@127.0.0.1:5432/dbname` |
+| `DATABASE_URL_DOCKER` | 否 | 可选的容器连接串覆盖，主机名使用 `postgres`；留空则由 `POSTGRES_*` 自动构造 |
 | `ADMIN_INVITE_CODE` | 是 | 管理员注册邀请码（`config/admin.yml` 里保持为空） |
 | `SESSION_SECRET` | 是 | 登录态 cookie 签名密钥，缺失时应用会拒绝启动 |
 | `SILICONFLOW_BASE_URL` | 否 | 默认 `https://api.siliconflow.cn/v1`，换兼容端点时才填 |
@@ -277,7 +273,7 @@ notepad .env
 4. **守卫只负责「不编造」**：资料不足时直接拒答，不负责挽救模型漏答；有资料但模型答得不完整时，守卫只补来源、不补内容。
 5. 退款只做「订单核验 + 建单」，不执行资金动作；订单是演示数据，不是真实订单。
 6. 管理后台的坐席是手工填写，无坐席账号体系与在线状态。
-7. 应用未容器化：只有 PostgreSQL 走 Docker，应用仍依赖本机 Python 环境。
+7. Docker Compose/FastAPI 容器已构建并启动验证；本地 Docker Desktop 运行时可按上面的 Compose 步骤启动。
 8. 工单事件表只追加不更新，未做归档；查询按 `ticket_id` 建索引。
 9. 数据库口令通过 `.env` 注入，仓库内不含默认口令；首次运行前必须先填 `POSTGRES_*`。
 
@@ -296,8 +292,14 @@ notepad .env
 可信回答守卫（分类推断、未知商品拒答、资料可用性判断、fail-open、同步/流式短路），
 以及**退款闭环**：缺订单号不建单、有效订单核验建单、无效订单仍转人工、
 跨会话订单拒绝、重复退款复用未关闭工单、系统通知里的工单号与数据库一致、
-同步与流式共用同一收尾逻辑。当前共 **73 个用例**。
-若 PostgreSQL 未启动，数据库相关用例会自动跳过而不是报错。
+同步与流式共用同一收尾逻辑。新加 5 个审批测试覆盖图暂停/批准/退回、PostgreSQL 检查点重建恢复及重复决定拒绝；总计收集 **78 个用例**。2026-10-23 在 Docker Compose PostgreSQL 环境运行完整套件，78 个用例全部通过。
+
+本轮可复现的完整测试输出：
+
+```text
+.\.venv\Scripts\python.exe -m pytest .\tests .\智能体\tests -v --tb=short -p no:cacheprovider
+======================= 78 passed, 2 warnings in 9.47s =======================
+```
 
 **效果评测**（`智能体/eval/`，跑真实模型与向量库）：
 
@@ -311,7 +313,11 @@ notepad .env
 
 - `questions.csv`：39 个 case / 43 轮对话，覆盖售前咨询、故障排查、无答案、商品分类隔离、多轮对话五类。
 - 四层检查：**检索层**（命中正确文档 / 低相关拦截 / 分类隔离）、**端到端**（工具调用、来源引用、无依据却肯定作答、**声称检索但未检索**）、**身份一致性**（多会话查记录是否取到自己的用户 ID）、**知识库流程**（上传限制、索引失败与重试）。
-- 结果落在 `智能体/eval/results/`：`e2e_results.csv` / `answers.md` 保留最近一次完整运行（2026-10-19 旧口径），另存 `e2e_results_legacy.csv` / `answers_legacy.md`；`e2e_results_before.csv` / `answers_before.md` 是改进前、修正口径后重算的基线；`e2e_summary.csv` 为改进前后对照（after 列标注未运行原因）。
+- 结果落在 `智能体/eval/results/`：`e2e_results.csv` / `answers.md` 仍是 2026-10-19 的旧结果（基于旧对话模型配置）。本轮尝试重跑 43 轮评测时脚本长时间没有进度输出，已中止；旧文件未覆盖，并备份为 `e2e_results_backup_2026-10-23.csv`、`answers_backup_2026-10-23.md`。当前已将默认对话模型切换为 `deepseek-ai/DeepSeek-V4.1-Flash`，尚无该模型的新 43 轮评测指标；`e2e_summary.csv` 的 after 不能作为新模型证据。
+
+### 人工审批 interrupt
+
+有效合成订单核验并建单后，程序先将图运行到 `interrupt`，再将工单显示为“待审批”。管理员批准或退回时，FastAPI 按工单派生的稳定 `thread_id` 发送 `Command(resume=...)`，最终答复由程序生成并写入该用户会话。PostgresSaver 与业务数据库共用 PostgreSQL。此流程只确认演示资格，不连接真实退款接口。内存图和 PostgreSQL 检查点重建恢复测试均通过；真实浏览器端到端审批操作仍需手工验收。
 
 **评分口径先于代码修正**：旧指标把「本助手没有周报功能」「无法查询股票数据」误判成无依据作答，也没有单独度量「声称检索但没调工具」。修正后按「先承认没资料、随后又给通用结论」判定，并新增 `claimed_retrieval_without_tool` 字段；改进前基线因此由旧 3/8（22、24、25）变为 **3/8（22、23、27）**，数量相同但构成不同，明细见 `answers_before.md`。
 

@@ -2,7 +2,7 @@
 {% import "_message.html" as ui %}
 {% block title %}工单 #{{ ticket.id }} · 对话记录{% endblock %}
 {% block content %}
-{% set badge = {'待接入': 'pending', '处理中': 'processing', '已解决': 'done'} %}
+{% set badge = {'待接入': 'pending', '待审批': 'pending', '审批已通过': 'done', '审批已退回': 'processing', '处理中': 'processing', '已解决': 'done'} %}
 <p><a class="btn" href="/admin/tickets">← 返回工单列表</a></p>
 
 <section class="thread ticket-conversation">
@@ -30,6 +30,17 @@
     ｜ 责任人：{{ ticket.agent_name or '未指派' }}</p>
   {% if ticket.resolution %}<p class="hint">处理记录：{{ ticket.resolution }}</p>{% endif %}
   {% if ticket.close_reason %}<p class="hint">关闭原因：{{ ticket.close_reason }}</p>{% endif %}
+  {% if ticket.status == '待审批' %}
+  <div class="ticket-history">
+    <h3>模拟退款资格审批</h3>
+    <p>仅审批演示订单资格，不会执行真实退款。审批决定会通过原会话发送给用户。</p>
+    <form class="ticket-actions" method="post" action="/admin/tickets/{{ ticket.id }}/approval">
+      <label class="wide">审批记录<input name="note" maxlength="500" placeholder="可记录核验依据或退回原因"></label>
+      <button name="decision" value="approve" type="submit">批准模拟资格</button>
+      <button name="decision" value="reject" type="submit">退回人工核实</button>
+    </form>
+  </div>
+  {% endif %}
   <details class="ticket-history">
     <summary>变更记录（{{ events|length }}）</summary>
     {% if events %}
@@ -46,11 +57,11 @@
     <input type="hidden" name="ticket_id" value="{{ ticket.id }}">
     <input type="hidden" name="back" value="/admin/tickets/{{ ticket.id }}">
     <label>责任人 <input name="agent_name" value="{{ ticket.agent_name or '' }}" placeholder="如：客服小李"></label>
-    <label>转为
+    {% if ticket.status != '待审批' %}<label>转为
       <select name="status">
         {% for s in statuses %}<option value="{{ s }}" {% if s == ticket.status %}selected{% endif %}>{{ s }}</option>{% endfor %}
       </select>
-    </label>
+    </label>{% else %}<input type="hidden" name="status" value="待审批">{% endif %}
     <label class="wide">处理记录
       <textarea name="resolution" rows="2" placeholder="记录核实过程与处理结果，如：已核对订单 #20260812，符合七天无理由，已发起退款">{{ ticket.resolution or '' }}</textarea>
     </label>

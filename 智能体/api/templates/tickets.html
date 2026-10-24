@@ -1,12 +1,13 @@
 {% extends "base.html" %}
 {% block title %}人工工单{% endblock %}
 {% block content %}
-{% set badge = {'待接入': 'pending', '处理中': 'processing', '已解决': 'done'} %}
+{% set badge = {'待接入': 'pending', '待审批': 'pending', '审批已通过': 'done', '审批已退回': 'processing', '处理中': 'processing', '已解决': 'done'} %}
 <div class="stats">
   {% for state in statuses %}
   <div class="card"><div class="num">{{ counts[state] }}</div><div class="label">{{ state }}</div></div>
   {% endfor %}
 </div>
+<section class="page-intro"><div><p class="eyebrow">人工服务</p><p>查看与处理工单。待审批工单需进入详情页完成模拟退款资格审批。</p></div></section>
 
 <form class="filters" method="get" action="/admin/tickets">
   <label>工单状态
@@ -50,12 +51,14 @@
       <p class="hint">暂无变更记录</p>
       {% endif %}
     </details>
-    <form class="ticket-actions" method="post" action="/admin/tickets/update">
+    {% if t.status == '待审批' %}
+    <p class="hint">模拟退款资格待审批。<a href="/admin/tickets/{{ t.id }}">打开工单详情并审批</a></p>
+    {% else %}<form class="ticket-actions" method="post" action="/admin/tickets/update">
       <input type="hidden" name="ticket_id" value="{{ t.id }}">
       <label>责任人 <input name="agent_name" value="{{ t.agent_name or '' }}" placeholder="如：客服小李"></label>
       <label>转为
         <select name="status">
-          {% for s in statuses %}<option value="{{ s }}" {% if s == t.status %}selected{% endif %}>{{ s }}</option>{% endfor %}
+        {% for s in editable_statuses %}<option value="{{ s }}" {% if s == t.status %}selected{% endif %}>{{ s }}</option>{% endfor %}
         </select>
       </label>
       <label class="wide">处理记录
@@ -65,7 +68,7 @@
         <input name="close_reason" value="{{ t.close_reason or '' }}" placeholder="关闭时填写，如：已与用户确认解决 / 用户撤销诉求">
       </label>
       <button type="submit">更新工单</button>
-    </form>
+    </form>{% endif %}
   </section>
   {% endfor %}
 {% endif %}

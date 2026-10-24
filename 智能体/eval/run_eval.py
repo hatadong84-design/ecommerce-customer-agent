@@ -25,11 +25,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from 智能体.rag import rag_service
-
-# 评测时关掉 RAG 的提示词调试打印，否则每轮检索都会把整段提示词刷到 stdout
-rag_service.print_prompt = lambda prompt: prompt
-
 from langchain_core.messages import AIMessage, ToolMessage
 
 from 智能体.admin import store
